@@ -13,6 +13,7 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/authz"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/httpx"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/platformdb"
 )
 
 func main() {
@@ -33,6 +34,10 @@ func main() {
 		log.Fatalf("tidak bisa terhubung ke database: %v", err)
 	}
 	log.Println("terhubung ke platform DB")
+
+	if err := platformdb.Migrate(context.Background(), pool); err != nil {
+		log.Fatalf("migrasi platform DB gagal: %v", err)
+	}
 
 	srv := &httpx.Server{
 		DB:       pool,
