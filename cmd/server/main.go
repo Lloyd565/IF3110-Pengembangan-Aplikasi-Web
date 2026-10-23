@@ -8,6 +8,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/auth"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/authz"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/httpx"
 )
 
 func main() {
@@ -29,23 +34,13 @@ func main() {
 	}
 	log.Println("terhubung ke platform DB")
 
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Hello world\n"))
-	})
-
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-		if err := pool.Ping(ctx); err != nil {
-			log.Printf("healthz: %v", err)
-			http.Error(w, "database unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		w.Write([]byte("ok\n"))
-	})
+	srv := &httpx.Server{
+		DB:       pool,
+		Sessions: &auth.Sessions{DB: pool},
+		Authz:    &authz.Authorizer{DB: pool},
+		Conns:    &dbconn.Registry{DB: pool},
+	}
 
 	log.Println("listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	log.Fatal(http.ListenAndServe(":8080", srv.Routes()))
 }
