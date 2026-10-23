@@ -1,5 +1,3 @@
--- 0001_init: skema Platform DB (owner: C). Dibekukan setelah sesi kontrak.
-
 CREATE EXTENSION IF NOT EXISTS citext;
 
 CREATE TABLE users (
@@ -26,8 +24,6 @@ CREATE TABLE group_members (
 );
 CREATE INDEX group_members_user_id_idx ON group_members (user_id);
 
--- id dibuat di aplikasi sebelum INSERT (dipakai sebagai AD AES-GCM), jadi tanpa DEFAULT.
--- Hapus = soft-delete (deleted_at) agar riwayat migration tetap ada.
 CREATE TABLE db_connections (
     id           uuid        PRIMARY KEY,
     name         text        NOT NULL,
@@ -53,7 +49,6 @@ CREATE TABLE db_grants (
 );
 CREATE INDEX db_grants_connection_id_idx ON db_grants (connection_id);
 
--- token_hash/prev_token_hash = sha256(token). Token mentah tidak pernah disimpan.
 CREATE TABLE sessions (
     id                  bigserial PRIMARY KEY,
     user_id             bigint      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -71,7 +66,6 @@ CREATE TABLE sessions (
 CREATE INDEX sessions_user_id_idx ON sessions (user_id);
 CREATE INDEX sessions_prev_token_hash_idx ON sessions (prev_token_hash) WHERE prev_token_hash IS NOT NULL;
 
--- version NULL selama draft, diisi MAX+1 saat eksekusi.
 CREATE TABLE migrations (
     id            bigserial PRIMARY KEY,
     connection_id uuid        NOT NULL REFERENCES db_connections(id),
