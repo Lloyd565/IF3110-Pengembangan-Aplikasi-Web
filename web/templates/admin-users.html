@@ -1,0 +1,76 @@
+{{define "title"}}Admin Pengguna{{end}}
+{{define "content"}}
+<link rel="stylesheet" href="/static/admin.css">
+<nav class="crumbs admin-nav" aria-label="Menu admin">
+  <a href="/dashboard">Dashboard</a>
+  <a href="/admin/users" aria-current="page">Pengguna</a>
+  <a href="/admin/groups">Group</a>
+  <a href="/admin/connections">Koneksi</a>
+  <a href="/admin/grants">Hak akses</a>
+</nav>
+<div class="page-head"><h1>Admin Pengguna</h1></div>
+
+{{with .Data.Flash.Error}}<p class="alert" role="alert">{{.}}</p>{{end}}
+{{with .Data.Flash.OK}}<p class="ok" role="status">{{.}}</p>{{end}}
+
+<section class="card admin">
+  <h2>Tambah user</h2>
+  <form method="post" action="/admin/users" class="row-form">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <input type="hidden" name="action" value="create">
+    <label>Username
+      <input type="text" name="username" required maxlength="64" autocomplete="off">
+    </label>
+    <label>Password (min. 8 karakter)
+      <input type="password" name="password" required minlength="8" autocomplete="new-password">
+    </label>
+    <label class="check"><input type="checkbox" name="is_admin"> Platform Admin</label>
+    <button type="submit">Tambah user</button>
+  </form>
+</section>
+
+<section class="card admin">
+  <h2>Daftar user</h2>
+  {{if .Data.Users}}
+  <table>
+    <thead><tr><th>Username</th><th>Peran</th><th>Status</th><th>Aksi</th></tr></thead>
+    <tbody>
+    {{range .Data.Users}}
+      <tr>
+        <td>{{.Username}}</td>
+        <td>{{if .IsPlatformAdmin}}<span class="badge badge-admin">Admin</span>{{else}}User{{end}}</td>
+        <td>{{if .IsActive}}<span class="badge badge-success">Aktif</span>{{else}}<span class="badge badge-failed">Nonaktif</span>{{end}}</td>
+        <td>
+          {{if ne .ID $.Data.Self}}
+          <form method="post" action="/admin/users" class="inline">
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+            <input type="hidden" name="action" value="set_active">
+            <input type="hidden" name="id" value="{{.ID}}">
+            <input type="hidden" name="active" value="{{if .IsActive}}0{{else}}1{{end}}">
+            <button type="submit" class="secondary">{{if .IsActive}}Nonaktifkan{{else}}Aktifkan{{end}}</button>
+          </form>
+          <form method="post" action="/admin/users" class="inline">
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+            <input type="hidden" name="action" value="set_admin">
+            <input type="hidden" name="id" value="{{.ID}}">
+            <input type="hidden" name="admin" value="{{if .IsPlatformAdmin}}0{{else}}1{{end}}">
+            <button type="submit" class="secondary">{{if .IsPlatformAdmin}}Cabut admin{{else}}Jadikan admin{{end}}</button>
+          </form>
+          {{end}}
+          <form method="post" action="/admin/users" class="inline">
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+            <input type="hidden" name="action" value="reset_password">
+            <input type="hidden" name="id" value="{{.ID}}">
+            <input type="password" name="password" required minlength="8" autocomplete="new-password" placeholder="Password baru" aria-label="Password baru untuk {{.Username}}">
+            <button type="submit" class="secondary">Reset password</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="muted">Belum ada user.</p>
+  {{end}}
+</section>
+{{end}}

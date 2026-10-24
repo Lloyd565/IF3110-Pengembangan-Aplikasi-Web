@@ -1,0 +1,92 @@
+{{define "title"}}Admin Group{{end}}
+{{define "content"}}
+<link rel="stylesheet" href="/static/admin.css">
+<nav class="crumbs admin-nav" aria-label="Menu admin">
+  <a href="/dashboard">Dashboard</a>
+  <a href="/admin/users">Pengguna</a>
+  <a href="/admin/groups" aria-current="page">Group</a>
+  <a href="/admin/connections">Koneksi</a>
+  <a href="/admin/grants">Hak akses</a>
+</nav>
+<div class="page-head"><h1>Admin Group &amp; Anggota</h1></div>
+
+{{with .Data.Flash.Error}}<p class="alert" role="alert">{{.}}</p>{{end}}
+{{with .Data.Flash.OK}}<p class="ok" role="status">{{.}}</p>{{end}}
+
+<section class="card admin">
+  <h2>Buat group</h2>
+  <form method="post" action="/admin/groups" class="row-form">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <input type="hidden" name="action" value="create">
+    <label>Nama group
+      <input type="text" name="name" required maxlength="100" autocomplete="off">
+    </label>
+    <label>Deskripsi
+      <input type="text" name="description" maxlength="300" autocomplete="off">
+    </label>
+    <button type="submit">Buat group</button>
+  </form>
+</section>
+
+<section class="card admin">
+  <h2>Daftar group</h2>
+  {{if .Data.Groups}}
+  <table>
+    <thead><tr><th>Nama</th><th>Deskripsi</th><th>Anggota</th><th>Aksi</th></tr></thead>
+    <tbody>
+    {{range .Data.Groups}}
+      <tr>
+        <td>{{.Name}}</td>
+        <td>{{.Description}}</td>
+        <td>{{.Members}}</td>
+        <td><a href="/admin/groups?id={{.ID}}">Kelola anggota</a></td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="muted">Belum ada group.</p>
+  {{end}}
+</section>
+
+{{with .Data.Selected}}
+<section class="card admin">
+  <h2>Anggota group &ldquo;{{.Name}}&rdquo;</h2>
+  <form method="post" action="/admin/groups" class="row-form">
+    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+    <input type="hidden" name="action" value="add_member">
+    <input type="hidden" name="group_id" value="{{.ID}}">
+    <label>Tambah anggota
+      <select name="user_id" required>
+        {{range $.Data.Users}}{{if .IsActive}}<option value="{{.ID}}">{{.Username}}</option>{{end}}{{end}}
+      </select>
+    </label>
+    <button type="submit">Tambah anggota</button>
+  </form>
+
+  {{if $.Data.Members}}
+  <table>
+    <thead><tr><th>Username</th><th>Aksi</th></tr></thead>
+    <tbody>
+    {{range $.Data.Members}}
+      <tr>
+        <td>{{.Username}}</td>
+        <td>
+          <form method="post" action="/admin/groups" class="inline">
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+            <input type="hidden" name="action" value="remove_member">
+            <input type="hidden" name="group_id" value="{{$.Data.Selected.ID}}">
+            <input type="hidden" name="user_id" value="{{.UserID}}">
+            <button type="submit" class="danger">Keluarkan</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="muted">Group ini belum punya anggota.</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}

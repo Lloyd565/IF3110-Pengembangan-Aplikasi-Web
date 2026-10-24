@@ -1,0 +1,86 @@
+{{define "title"}}Admin Hak Akses{{end}}
+{{define "content"}}
+<link rel="stylesheet" href="/static/admin.css">
+<nav class="crumbs admin-nav" aria-label="Menu admin">
+  <a href="/dashboard">Dashboard</a>
+  <a href="/admin/users">Pengguna</a>
+  <a href="/admin/groups">Group</a>
+  <a href="/admin/connections">Koneksi</a>
+  <a href="/admin/grants" aria-current="page">Hak akses</a>
+</nav>
+<div class="page-head"><h1>Admin Hak Akses</h1></div>
+
+{{with .Data.Flash.Error}}<p class="alert" role="alert">{{.}}</p>{{end}}
+{{with .Data.Flash.OK}}<p class="ok" role="status">{{.}}</p>{{end}}
+
+<section class="card admin">
+  <h2>Beri atau ubah grant</h2>
+  <p class="muted">Akses diberikan ke group, bukan ke user. Jika seorang user ada di beberapa group pada database yang sama, level tertinggi yang berlaku.</p>
+  {{if and .Data.Groups .Data.Conns}}
+  <form method="post" action="/admin/grants" class="row-form">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <input type="hidden" name="action" value="set">
+    <label>Group
+      <select name="group_id" required>
+        {{range .Data.Groups}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+      </select>
+    </label>
+    <label>Database
+      <select name="connection_id" required>
+        {{range .Data.Conns}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+      </select>
+    </label>
+    <label>Level
+      <select name="level" required>
+        <option value="view">View Only</option>
+        <option value="edit">View + Edit</option>
+      </select>
+    </label>
+    <button type="submit">Simpan grant</button>
+  </form>
+  {{else}}
+  <p class="muted">Buat minimal satu group dan satu koneksi database terlebih dahulu.</p>
+  {{end}}
+</section>
+
+<section class="card admin">
+  <div class="page-head">
+    <h2>Daftar grant</h2>
+    <form method="get" action="/admin/grants" class="row-form">
+      <label>Filter level
+        <select name="level">
+          <option value=""{{if eq .Data.Level ""}} selected{{end}}>Semua</option>
+          <option value="view"{{if eq .Data.Level "view"}} selected{{end}}>View Only</option>
+          <option value="edit"{{if eq .Data.Level "edit"}} selected{{end}}>View + Edit</option>
+        </select>
+      </label>
+      <button type="submit" class="secondary">Terapkan</button>
+    </form>
+  </div>
+  {{if .Data.Grants}}
+  <table>
+    <thead><tr><th>Group</th><th>Database</th><th>Level</th><th>Aksi</th></tr></thead>
+    <tbody>
+    {{range .Data.Grants}}
+      <tr>
+        <td>{{.GroupName}}</td>
+        <td>{{.ConnectionName}}</td>
+        <td><span class="badge badge-{{.Level}}">{{if eq .Level "edit"}}View + Edit{{else}}View Only{{end}}</span></td>
+        <td>
+          <form method="post" action="/admin/grants" class="inline">
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+            <input type="hidden" name="action" value="remove">
+            <input type="hidden" name="group_id" value="{{.GroupID}}">
+            <input type="hidden" name="connection_id" value="{{.ConnectionID}}">
+            <button type="submit" class="danger">Cabut</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="muted">Belum ada grant{{if .Data.Level}} dengan level ini{{end}}.</p>
+  {{end}}
+</section>
+{{end}}

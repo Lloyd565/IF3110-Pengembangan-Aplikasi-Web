@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/admin"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/auth"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/authz"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
@@ -24,6 +25,7 @@ type Server struct {
 	Sessions       *auth.Sessions
 	Authz          *authz.Authorizer
 	Conns          *dbconn.Registry
+	Admin          *admin.Service
 	Credentials    Authenticator
 	SessionManager *auth.Manager
 	CSRF           auth.CSRF
