@@ -42,7 +42,8 @@ type Authorizer struct {
 }
 
 func (a *Authorizer) Can(ctx context.Context, p reqctx.Principal, connID uuid.UUID, act Action) error {
-	return nil
+	// Fail closed until the access/admin slice implements the grant policy.
+	return ErrForbidden
 }
 
 func (a *Authorizer) VisibleConnections(ctx context.Context, p reqctx.Principal) ([]ConnAccess, error) {

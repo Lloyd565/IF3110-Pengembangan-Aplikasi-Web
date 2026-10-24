@@ -1,0 +1,26 @@
+{{define "title"}}Dashboard{{end}}
+{{define "content"}}
+<div class="page-head"><h1>Dashboard</h1></div>
+{{if .User.IsPlatformAdmin}}
+<nav class="admin-nav card" aria-label="Administrasi platform">
+  <a href="/admin/users">Pengguna</a>
+  <a href="/admin/groups">Group &amp; anggota</a>
+  <a href="/admin/connections">Koneksi database</a>
+  <a href="/admin/grants">Hak akses</a>
+</nav>
+{{end}}
+<section class="card" aria-labelledby="connections-title">
+  <h2 id="connections-title">Database Anda</h2>
+  {{if .Data.Connections}}
+  <ul class="list connections">
+    {{range .Data.Connections}}<li>
+      <div><strong>{{.Name}}</strong><br><span class="muted">{{if eq .Level "edit"}}View + Edit{{else}}View Only{{end}}</span></div>
+      <div class="actions">
+        <a class="button" href="/db/{{.ConnectionID}}/schema">Buka explorer</a>
+        <a class="button secondary" href="/db/{{.ConnectionID}}/migrations">Riwayat migration</a>
+      </div>
+    </li>{{end}}
+  </ul>
+  {{else}}<p class="muted">Belum ada database yang dapat Anda akses. Hubungi Platform Admin untuk mendapatkan akses melalui group.</p>{{end}}
+</section>
+{{end}}

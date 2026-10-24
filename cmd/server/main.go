@@ -5,12 +5,15 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/auth"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/authz"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/config"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/httpx"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/migration"
@@ -18,21 +21,21 @@ import (
 )
 
 func main() {
-	dbURL := os.Getenv("PLATFORM_DATABASE_URL")
-	if dbURL == "" {
-		log.Fatal("PLATFORM_DATABASE_URL belum diset")
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	pool, err := pgxpool.New(context.Background(), dbURL)
+	pool, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("URL database tidak valid: %v", err)
+		log.Fatal("PLATFORM_DATABASE_URL tidak valid")
 	}
 	defer pool.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := pool.Ping(ctx); err != nil {
-		log.Fatalf("tidak bisa terhubung ke database: %v", err)
+		log.Fatal("tidak bisa terhubung ke database platform")
 	}
 	log.Println("terhubung ke platform DB")
 
@@ -46,12 +49,35 @@ func main() {
 	}
 
 	srv := &httpx.Server{
-		DB:       pool,
-		Sessions: &auth.Sessions{DB: pool},
-		Authz:    &authz.Authorizer{DB: pool},
-		Conns:    &dbconn.Registry{DB: pool},
+		PublicOrigin: cfg.PublicOrigin,
+		DB:           pool,
+		Sessions:     &auth.Sessions{DB: pool},
+		Authz:        &authz.Authorizer{DB: pool},
+		Conns:        &dbconn.Registry{DB: pool},
+	}
+	if err := srv.ConfigureAuth(cfg.SessionPolicy, cfg.SessionKey, cfg.Production); err != nil {
+		log.Fatalf("konfigurasi autentikasi gagal: %v", err)
 	}
 
-	log.Println("listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", srv.Routes()))
+	server := &http.Server{Addr: cfg.Address, Handler: srv.Routes(), ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout: 15 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second,
+		MaxHeaderBytes: 1 << 20}
+	ctxSignal, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		<-ctxSignal.Done()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			server.Close()
+		}
+	}()
+	log.Printf("listening on %s", cfg.Address)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("HTTP server berhenti: %v", err)
+		stop()
+	}
+	<-done
 }

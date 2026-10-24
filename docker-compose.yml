@@ -9,6 +9,45 @@ services:
       - "5433:5432"
     volumes:
       - platform-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform -d platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  target-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: target
+      POSTGRES_PASSWORD: target
+      POSTGRES_DB: target
+    ports:
+      - "5434:5432"
+    volumes:
+      - target-data:/var/lib/postgresql/data
+      - ./scripts/target-seed.sql:/docker-entrypoint-initdb.d/001-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U target -d target"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  test-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: test
+    ports:
+      - "5435:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   platform-data:
+  target-data:

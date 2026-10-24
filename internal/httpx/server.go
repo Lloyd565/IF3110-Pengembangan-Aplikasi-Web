@@ -11,18 +11,55 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/auth"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/authz"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/web"
 )
 
+type Authenticator interface {
+	Authenticate(context.Context, string, string) (reqctx.Principal, error)
+}
+
 type Server struct {
-	DB       *pgxpool.Pool
-	Sessions *auth.Sessions
-	Authz    *authz.Authorizer
-	Conns    *dbconn.Registry
+	DB             *pgxpool.Pool
+	Sessions       *auth.Sessions
+	Authz          *authz.Authorizer
+	Conns          *dbconn.Registry
+	Credentials    Authenticator
+	SessionManager *auth.Manager
+	CSRF           auth.CSRF
+	SecureCookies  bool
+	PublicOrigin   string
+	loginLimits    *loginLimiter
+	passwordSlots  chan struct{}
+}
+
+func (s *Server) ConfigureAuth(policy auth.Policy, key []byte, secure bool) error {
+	if s.Sessions == nil {
+		s.Sessions = &auth.Sessions{DB: s.DB}
+	}
+	manager, err := auth.NewManager(s.Sessions, policy, key)
+	if err != nil {
+		return err
+	}
+	credentials, err := auth.NewCredentials(s.DB)
+	if err != nil {
+		return err
+	}
+	s.SessionManager, s.Credentials = manager, credentials
+	s.CSRF, s.SecureCookies = auth.CSRF{Key: append([]byte(nil), key...)}, secure
+	return nil
 }
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
+	s.loginLimits = &loginLimiter{entries: make(map[string]loginWindow)}
+	s.passwordSlots = make(chan struct{}, 4)
+	protected := func(pattern string, handler http.HandlerFunc) {
+		mux.Handle(pattern, s.requireAuth(handler))
+	}
+	admin := func(pattern string, handler http.HandlerFunc) {
+		mux.Handle(pattern, s.requireAdmin(handler))
+	}
 
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
@@ -32,26 +69,29 @@ func (s *Server) Routes() http.Handler {
 
 	mux.HandleFunc("GET /login", s.loginForm)
 	mux.HandleFunc("POST /login", s.loginSubmit)
-	mux.HandleFunc("POST /logout", s.logout)
-	mux.HandleFunc("GET /dashboard", s.dashboard)
+	protected("POST /logout", s.logout)
+	protected("GET /dashboard", s.dashboard)
 
-	mux.HandleFunc("/admin/users", s.adminUsers)
-	mux.HandleFunc("/admin/groups", s.adminGroups)
-	mux.HandleFunc("/admin/connections", s.adminConnections)
-	mux.HandleFunc("/admin/grants", s.adminGrants)
+	admin("/admin/users", s.adminUsers)
+	admin("/admin/groups", s.adminGroups)
+	admin("/admin/connections", s.adminConnections)
+	admin("/admin/grants", s.adminGrants)
 
-	mux.HandleFunc("GET /db/{id}/schema", s.dbSchema)
-	mux.HandleFunc("GET /db/{id}/tables/{schema}/{table}", s.dbTable)
-	mux.HandleFunc("GET /db/{id}/data/{schema}/{table}", s.dbData)
-	mux.HandleFunc("GET /db/{id}/migrations", s.migrationList)
-	mux.HandleFunc("GET /db/{id}/migrations/new", s.migrationNewForm)
-	mux.HandleFunc("POST /db/{id}/migrations/new", s.migrationCreate)
-	mux.HandleFunc("GET /db/{id}/migrations/{mid}", s.migrationDetail)
-	mux.HandleFunc("GET /db/{id}/migrations/{mid}/edit", s.migrationEditForm)
-	mux.HandleFunc("POST /db/{id}/migrations/{mid}/edit", s.migrationUpdate)
-	mux.HandleFunc("POST /db/{id}/migrations/{mid}/execute", s.migrationExecute)
+	protected("GET /db/{id}/schema", s.dbSchema)
+	protected("GET /db/{id}/tables/{schema}/{table}", s.dbTable)
+	protected("GET /db/{id}/data/{schema}/{table}", s.dbData)
+	protected("GET /db/{id}/migrations", s.migrationList)
+	protected("GET /db/{id}/migrations/new", s.migrationNewForm)
+	protected("POST /db/{id}/migrations/new", s.migrationCreate)
+	protected("GET /db/{id}/migrations/{mid}", s.migrationDetail)
+	protected("GET /db/{id}/migrations/{mid}/edit", s.migrationEditForm)
+	protected("POST /db/{id}/migrations/{mid}/edit", s.migrationUpdate)
+	protected("POST /db/{id}/migrations/{mid}/execute", s.migrationExecute)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		s.renderError(w, r, http.StatusNotFound, "Halaman tidak ditemukan.")
+	})
 
-	return devPrincipal(mux)
+	return s.recoverMiddleware(s.secureHeaders(requestLogging(s.sessionMiddleware(s.csrfMiddleware(mux)))))
 }
 
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
