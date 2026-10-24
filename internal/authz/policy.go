@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	// "golang.org/x/text/cases"
 
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
 )
@@ -30,6 +31,31 @@ const (
 )
 
 var ErrForbidden = errors.New("authz: akses ditolak")
+
+var required = map[Action]Level{
+	SchemaView:       LevelView,
+	DataView:         LevelView,
+	MigrationView:    LevelView,
+	MigrationCreate:  LevelEdit,
+	MigrationUpdate:  LevelEdit,
+	MigrationExecute: LevelEdit,
+}
+
+func rank(l Level) int {
+	switch l {
+	case LevelView:
+		return 1
+	case LevelEdit:
+		return 2
+	}
+	return 0
+}
+
+func Allows(have Level, act Action) bool {
+	need, ok := required[act]
+	return ok && rank(have) >= rank(need)
+}
+
 
 type ConnAccess struct {
 	ConnectionID uuid.UUID
