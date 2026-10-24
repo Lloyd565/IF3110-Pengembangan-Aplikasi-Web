@@ -36,7 +36,7 @@ func (s *Server) migrationError(w http.ResponseWriter, r *http.Request, err erro
 	case errors.Is(err, migration.ErrNotFound):
 		s.renderError(w, r, http.StatusNotFound, "Migration tidak ditemukan.")
 	case errors.Is(err, migration.ErrNotDraft):
-		s.renderError(w, r, http.StatusConflict, "Migration ini sudah dieksekusi, jadi tidak bisa diubah atau dijalankan ulang. Buat draft baru dari migration tersebut.")
+		s.renderError(w, r, http.StatusConflict, "Migration ini sudah dieksekusi. Tolong buat draf baru")
 	default:
 		log.Printf("migration %s: %v", r.URL.Path, err)
 		s.renderError(w, r, http.StatusInternalServerError, "Terjadi kesalahan saat memproses migration.")
@@ -242,10 +242,10 @@ func (s *Server) migrationExecute(w http.ResponseWriter, r *http.Request) {
 	case errors.As(err, &ve):
 		s.renderError(w, r, http.StatusUnprocessableEntity, ve.Error()+" Migration tetap berstatus draft.")
 	case errors.Is(err, migration.ErrBusy):
-		s.renderError(w, r, http.StatusConflict, "Masih ada migration lain yang sedang berjalan di database ini. Tunggu sampai selesai, lalu coba lagi.")
+		s.renderError(w, r, http.StatusConflict, "Ada migration lain yang sedang berjalan di database ini.")
 	case errors.Is(err, migration.ErrTargetUnavailable):
 		log.Printf("execute %s/%d: %v", connID, id, err)
-		s.renderError(w, r, http.StatusBadGateway, "Database target tidak dapat dihubungi. Migration tetap berstatus draft, silakan coba lagi nanti.")
+		s.renderError(w, r, http.StatusBadGateway, "Database target tidak dapat dihubungi. Migration tersimpan di draft.")
 	default:
 		s.migrationError(w, r, err)
 	}
