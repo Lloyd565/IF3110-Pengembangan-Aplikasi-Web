@@ -1,0 +1,26 @@
+{{define "layout"}}<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{template "title" .}} · IF3110 DB Platform</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/dashboard">IF3110 Database Management Platform</a>
+  {{if .LoggedIn}}
+  <div class="who">
+    <span>{{.User.Username}}</span>
+    <form method="post" action="/logout">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit" class="link">Keluar</button>
+    </form>
+  </div>
+  {{end}}
+</header>
+<main>
+{{template "content" .}}
+</main>
+</body>
+</html>{{end}}

@@ -1,6 +1,3 @@
-// Package httpx: routing, middleware, handler (owner server.go: A).
-// Semua route sudah terdaftar. Isi handler di file masing-masing:
-// handlers_auth.go (A), handlers_admin.go (B), handlers_db.go (C).
 package httpx
 
 import (
@@ -14,6 +11,7 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/auth"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/authz"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/web"
 )
 
 type Server struct {
@@ -30,20 +28,18 @@ func (s *Server) Routes() http.Handler {
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 	})
 	mux.HandleFunc("GET /healthz", s.healthz)
+	mux.Handle("GET /static/", http.FileServerFS(web.FS))
 
-	// A
 	mux.HandleFunc("GET /login", s.loginForm)
 	mux.HandleFunc("POST /login", s.loginSubmit)
 	mux.HandleFunc("POST /logout", s.logout)
 	mux.HandleFunc("GET /dashboard", s.dashboard)
 
-	// B (method GET/POST dibedakan di dalam handler)
 	mux.HandleFunc("/admin/users", s.adminUsers)
 	mux.HandleFunc("/admin/groups", s.adminGroups)
 	mux.HandleFunc("/admin/connections", s.adminConnections)
 	mux.HandleFunc("/admin/grants", s.adminGrants)
 
-	// C
 	mux.HandleFunc("GET /db/{id}/schema", s.dbSchema)
 	mux.HandleFunc("GET /db/{id}/tables/{schema}/{table}", s.dbTable)
 	mux.HandleFunc("GET /db/{id}/data/{schema}/{table}", s.dbData)
@@ -55,7 +51,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /db/{id}/migrations/{mid}/edit", s.migrationUpdate)
 	mux.HandleFunc("POST /db/{id}/migrations/{mid}/execute", s.migrationExecute)
 
-	// TODO(A): rantai recover → secureHeaders → logging → session → CSRF → requireAuth.
 	return devPrincipal(mux)
 }
 
