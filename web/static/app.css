@@ -94,3 +94,56 @@ button.link { background: none; border: 0; padding: 0; color: var(--primary); te
 
 .error-page { text-align: center; padding: 48px 0; }
 .error-code { font-size: 3rem; font-weight: 700; color: var(--danger); margin: 0; }
+
+.actions { display: flex; gap: 8px; align-items: center; }
+.actions form { margin: 0; }
+
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #fff;
+  vertical-align: middle;
+}
+.badge-draft { background: #6c757d; }
+.badge-running { background: #1c7ed6; }
+.badge-success { background: var(--success); }
+.badge-failed { background: var(--danger); }
+
+.status-failed { border-left: 4px solid var(--danger); }
+.status-success { border-left: 4px solid var(--success); }
+
+pre.sql, pre.error-message {
+  margin: 0;
+  padding: 12px;
+  background: var(--bg);
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+pre.error-message { color: var(--danger); }
+
+.meta { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
+.meta dt { color: var(--muted); }
+.meta dd { margin: 0; }
+
+.editor { display: flex; flex-direction: column; gap: 8px; }
+.editor label { font-weight: 600; }
+.editor input[type=text], .editor textarea {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+}
+.editor textarea { font-family: ui-monospace, Consolas, monospace; font-size: 0.9rem; }
+
+.alert {
+  padding: 10px 14px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  background: #fff5f5;
+  color: var(--danger);
+}

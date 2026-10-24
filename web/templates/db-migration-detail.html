@@ -1,0 +1,52 @@
+{{define "title"}}Migration {{.Data.M.Name}}{{end}}
+{{define "content"}}
+{{$id := .Data.ConnID}}{{$m := .Data.M}}
+<nav class="crumbs">
+  <a href="/dashboard">Dashboard</a> /
+  <a href="/db/{{$id}}/migrations">Riwayat migration</a> /
+  {{$m.Name}}
+</nav>
+<div class="page-head">
+  <h1>Detail Migration <span class="muted">{{with $m.Version}}v{{.}} · {{end}}{{$m.Name}}</span></h1>
+  <div class="actions">
+    {{if $m.IsDraft}}
+      {{if .Data.CanUpdate}}<a class="button secondary" href="/db/{{$id}}/migrations/{{$m.ID}}/edit">Edit draft</a>{{end}}
+      {{if .Data.CanExecute}}
+      <form method="post" action="/db/{{$id}}/migrations/{{$m.ID}}/execute">
+        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+        <button type="submit">Eksekusi</button>
+      </form>
+      {{end}}
+    {{else if and .Data.CanCreate (ne $m.Status "running")}}
+      <a class="button secondary" href="/db/{{$id}}/migrations/new?from={{$m.ID}}">Buat draft baru dari ini</a>
+    {{end}}
+  </div>
+</div>
+
+<section class="card status-card status-{{$m.Status}}">
+  <h2>Status <span class="badge badge-{{$m.Status}}">{{$m.Status}}</span></h2>
+  {{if eq $m.Status "draft"}}<p class="muted">Belum dieksekusi. Draft masih bisa diubah.</p>{{end}}
+  {{if eq $m.Status "running"}}<p class="muted">Sedang dijalankan di database target.</p>{{end}}
+  {{if eq $m.Status "success"}}<p>Berhasil dijalankan dan di-commit.</p>{{end}}
+  {{if eq $m.Status "failed"}}
+    <p>Gagal dan di-rollback. Database target tidak berubah.</p>
+    {{with $m.ErrorMessage}}<pre class="error-message">{{.}}</pre>{{end}}
+  {{end}}
+</section>
+
+<section class="card">
+  <h2>SQL</h2>
+  <pre class="sql">{{$m.SQL}}</pre>
+</section>
+
+<section class="card">
+  <h2>Pelaksana dan waktu</h2>
+  <dl class="meta">
+    <dt>Dibuat oleh</dt><dd>{{$m.CreatedByName}} · {{$m.CreatedAt.Format "02 Jan 2006 15:04:05"}}</dd>
+    <dt>Terakhir diubah</dt><dd>{{$m.UpdatedAt.Format "02 Jan 2006 15:04:05"}}</dd>
+    <dt>Dieksekusi oleh</dt><dd>{{with $m.ExecutedByName}}{{.}}{{else}}-{{end}}</dd>
+    <dt>Mulai</dt><dd>{{with $m.StartedAt}}{{.Format "02 Jan 2006 15:04:05"}}{{else}}-{{end}}</dd>
+    <dt>Selesai</dt><dd>{{with $m.FinishedAt}}{{.Format "02 Jan 2006 15:04:05"}}{{else}}-{{end}}</dd>
+  </dl>
+</section>
+{{end}}

@@ -1,0 +1,37 @@
+{{define "title"}}Riwayat Migration{{end}}
+{{define "content"}}
+{{$id := .Data.ConnID}}
+<nav class="crumbs">
+  <a href="/dashboard">Dashboard</a> /
+  <a href="/db/{{$id}}/schema">Schema</a> /
+  Riwayat migration
+</nav>
+<div class="page-head">
+  <h1>Riwayat Migration</h1>
+  {{if .Data.CanCreate}}<a class="button" href="/db/{{$id}}/migrations/new">Draft baru</a>{{end}}
+</div>
+
+<section class="card">
+  {{if .Data.Migrations}}
+  <table>
+    <thead><tr><th>Versi</th><th>Nama</th><th>Status</th><th>Dibuat oleh</th><th>Dieksekusi</th></tr></thead>
+    <tbody>
+    {{range .Data.Migrations}}
+      <tr>
+        <td>{{with .Version}}v{{.}}{{else}}<span class="muted">-</span>{{end}}</td>
+        <td><a href="/db/{{$id}}/migrations/{{.ID}}">{{.Name}}</a></td>
+        <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
+        <td>{{.CreatedByName}}</td>
+        <td>
+          {{with .ExecutedByName}}{{.}}{{end}}
+          {{with .FinishedAt}}<span class="muted">{{.Format "02 Jan 2006 15:04"}}</span>{{end}}
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="muted">Belum ada migration untuk database ini.</p>
+  {{end}}
+</section>
+{{end}}

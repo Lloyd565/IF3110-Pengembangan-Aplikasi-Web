@@ -14,7 +14,7 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
 )
 
-func (s *Server) dbAccess(w http.ResponseWriter, r *http.Request, act authz.Action) (connID uuid.UUID, pool *pgxpool.Pool, ok bool) {
+func (s *Server) dbAuthorize(w http.ResponseWriter, r *http.Request, act authz.Action) (connID uuid.UUID, p reqctx.Principal, ok bool) {
 	p, loggedIn := reqctx.CurrentPrincipal(r.Context())
 	if !loggedIn {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
@@ -32,7 +32,19 @@ func (s *Server) dbAccess(w http.ResponseWriter, r *http.Request, act authz.Acti
 		s.renderError(w, r, http.StatusForbidden, "Anda tidak punya akses untuk aksi ini pada database tersebut.")
 		return
 	}
-	pool, err = s.Conns.Pool(r.Context(), connID)
+	return connID, p, true
+}
+
+func (s *Server) can(r *http.Request, p reqctx.Principal, connID uuid.UUID, act authz.Action) bool {
+	return s.Authz.Can(r.Context(), p, connID, act) == nil
+}
+
+func (s *Server) dbAccess(w http.ResponseWriter, r *http.Request, act authz.Action) (connID uuid.UUID, pool *pgxpool.Pool, ok bool) {
+	connID, _, ok = s.dbAuthorize(w, r, act)
+	if !ok {
+		return
+	}
+	pool, err := s.Conns.Pool(r.Context(), connID)
 	if err != nil {
 		log.Printf("pool %s: %v", connID, err)
 		s.renderError(w, r, http.StatusBadGateway, "Database target tidak dapat dihubungi.")
@@ -106,11 +118,3 @@ func (s *Server) dbData(w http.ResponseWriter, r *http.Request) {
 		"NextPage": page + 1,
 	})
 }
-
-func (s *Server) migrationList(w http.ResponseWriter, r *http.Request)     { notImplemented(w, r) }
-func (s *Server) migrationDetail(w http.ResponseWriter, r *http.Request)   { notImplemented(w, r) }
-func (s *Server) migrationNewForm(w http.ResponseWriter, r *http.Request)  { notImplemented(w, r) }
-func (s *Server) migrationCreate(w http.ResponseWriter, r *http.Request)   { notImplemented(w, r) }
-func (s *Server) migrationEditForm(w http.ResponseWriter, r *http.Request) { notImplemented(w, r) }
-func (s *Server) migrationUpdate(w http.ResponseWriter, r *http.Request)   { notImplemented(w, r) }
-func (s *Server) migrationExecute(w http.ResponseWriter, r *http.Request)  { notImplemented(w, r) }
