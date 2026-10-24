@@ -1,14 +1,9 @@
 package authz
 
 import (
-	"context"
 	"errors"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
-	// "golang.org/x/text/cases"
-
-	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
 )
 
 type Action string
@@ -56,21 +51,8 @@ func Allows(have Level, act Action) bool {
 	return ok && rank(have) >= rank(need)
 }
 
-
 type ConnAccess struct {
 	ConnectionID uuid.UUID
 	Name         string
 	Level        Level
-}
-
-type Authorizer struct {
-	DB *pgxpool.Pool
-}
-
-func (a *Authorizer) Can(ctx context.Context, p reqctx.Principal, connID uuid.UUID, act Action) error {
-	return nil
-}
-
-func (a *Authorizer) VisibleConnections(ctx context.Context, p reqctx.Principal) ([]ConnAccess, error) {
-	return nil, nil
 }
