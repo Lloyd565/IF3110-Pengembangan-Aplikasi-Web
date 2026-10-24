@@ -13,6 +13,7 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/authz"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/httpx"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/migration"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/platformdb"
 )
 
@@ -37,6 +38,11 @@ func main() {
 
 	if err := platformdb.Migrate(context.Background(), pool); err != nil {
 		log.Fatalf("migrasi platform DB gagal: %v", err)
+	}
+	if n, err := migration.RecoverInterrupted(context.Background(), pool); err != nil {
+		log.Fatalf("pemulihan migration yang terputus gagal: %v", err)
+	} else if n > 0 {
+		log.Printf("PERINGATAN: %d migration yang terputus ditandai failed; periksa Target DB secara manual", n)
 	}
 
 	srv := &httpx.Server{

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/authz"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/migration"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
 )
 
 const maxFormBytes = 200 << 10
@@ -35,7 +36,7 @@ func (s *Server) migrationError(w http.ResponseWriter, r *http.Request, err erro
 	case errors.Is(err, migration.ErrNotFound):
 		s.renderError(w, r, http.StatusNotFound, "Migration tidak ditemukan.")
 	case errors.Is(err, migration.ErrNotDraft):
-		s.renderError(w, r, http.StatusConflict, "Migration yang sudah dieksekusi tidak bisa diubah. Buat draft baru dari migration tersebut.")
+		s.renderError(w, r, http.StatusConflict, "Migration ini sudah dieksekusi, jadi tidak bisa diubah atau dijalankan ulang. Buat draft baru dari migration tersebut.")
 	default:
 		log.Printf("migration %s: %v", r.URL.Path, err)
 		s.renderError(w, r, http.StatusInternalServerError, "Terjadi kesalahan saat memproses migration.")
@@ -180,4 +181,30 @@ func (s *Server) migrationUpdate(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, fmt.Sprintf("/db/%s/migrations/%d", connID, id), http.StatusSeeOther)
 }
 
-func (s *Server) migrationExecute(w http.ResponseWriter, r *http.Request) { notImplemented(w, r) }
+func (s *Server) migrationExecute(w http.ResponseWriter, r *http.Request) {
+	connID, target, ok := s.dbAccess(w, r, authz.MigrationExecute)
+	if !ok {
+		return
+	}
+	id, valid := migrationID(r)
+	if !valid {
+		s.migrationError(w, r, migration.ErrNotFound)
+		return
+	}
+	p, _ := reqctx.CurrentPrincipal(r.Context())
+	err := migration.Execute(r.Context(), s.DB, target, connID, id, p.UserID)
+	var ve migration.ValidationError
+	switch {
+	case err == nil:
+		http.Redirect(w, r, fmt.Sprintf("/db/%s/migrations/%d", connID, id), http.StatusSeeOther)
+	case errors.As(err, &ve):
+		s.renderError(w, r, http.StatusUnprocessableEntity, ve.Error()+" Migration tetap berstatus draft.")
+	case errors.Is(err, migration.ErrBusy):
+		s.renderError(w, r, http.StatusConflict, "Masih ada migration lain yang sedang berjalan di database ini. Tunggu sampai selesai, lalu coba lagi.")
+	case errors.Is(err, migration.ErrTargetUnavailable):
+		log.Printf("execute %s/%d: %v", connID, id, err)
+		s.renderError(w, r, http.StatusBadGateway, "Database target tidak dapat dihubungi. Migration tetap berstatus draft, silakan coba lagi nanti.")
+	default:
+		s.migrationError(w, r, err)
+	}
+}
