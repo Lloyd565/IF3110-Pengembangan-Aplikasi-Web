@@ -1,4 +1,3 @@
-// Package platformdb: skema Platform DB dan runner-nya (owner: C).
 package platformdb
 
 import (

@@ -1,4 +1,3 @@
-// Package authz: kontrak otorisasi (owner: B).
 package authz
 
 import (
@@ -22,7 +21,6 @@ const (
 	MigrationExecute Action = "migration.execute"
 )
 
-// Level sama dengan nilai db_grants.level. LevelNone = tanpa grant.
 type Level string
 
 const (
@@ -31,27 +29,22 @@ const (
 	LevelEdit Level = "edit"
 )
 
-// ErrForbidden dikembalikan Can() saat ditolak. Handler memetakannya ke 403.
 var ErrForbidden = errors.New("authz: akses ditolak")
 
 type ConnAccess struct {
 	ConnectionID uuid.UUID
 	Name         string
-	Level        Level // akses efektif = MAX dari semua group user
+	Level        Level
 }
 
 type Authorizer struct {
 	DB *pgxpool.Pool
 }
 
-// Can: nil = boleh. Deny by default; error baca grant = ditolak (fail closed).
-// TODO(B): STUB sementara, selalu mengizinkan. Ganti sebelum integrasi Sabtu 19.00.
 func (a *Authorizer) Can(ctx context.Context, p reqctx.Principal, connID uuid.UUID, act Action) error {
 	return nil
 }
 
-// VisibleConnections: koneksi (belum di-soft-delete) yang punya grant untuk user, beserta level efektifnya.
-// TODO(B): STUB sementara.
 func (a *Authorizer) VisibleConnections(ctx context.Context, p reqctx.Principal) ([]ConnAccess, error) {
 	return nil, nil
 }
