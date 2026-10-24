@@ -127,6 +127,9 @@ func TestSecurityHeadersRecoveryAndSecretFreeLogging(t *testing.T) {
 	if w.Code != 500 || w.Header().Get("Content-Security-Policy") == "" || w.Header().Get("Strict-Transport-Security") == "" {
 		t.Fatal("recovery/headers")
 	}
+	if got := w.Header().Get("Referrer-Policy"); got != "same-origin" {
+		t.Fatalf("Referrer-Policy %q: no-referrer membuat browser mengirim Origin: null dan semua form ditolak", got)
+	}
 	if strings.Contains(logs.String(), "secret-") || strings.Contains(w.Body.String(), "secret-") {
 		t.Fatal("secret leaked")
 	}

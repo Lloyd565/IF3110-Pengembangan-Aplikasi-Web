@@ -24,9 +24,6 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/user"
 )
 
-// Handler dipanggil langsung (bukan lewat Routes) dengan Principal di context,
-// sehingga test ini hanya menguji lapisan akses + halaman admin.
-
 type admEnv struct {
 	srv  *Server
 	db   *pgxpool.Pool
@@ -282,8 +279,25 @@ func TestDatabaseAccessDenied(t *testing.T) {
 	}
 
 	// View + Edit: boleh membuat draft
-	if rr := e.call(e.srv.migrationCreate, "POST", "/db/"+id+"/migrations/new", newMig, admPrincipal(editor, false), id); rr.Code != http.StatusSeeOther {
-		t.Errorf("view+edit membuat migration: %d %s", rr.Code, admBody(rr))
+	rr := e.call(e.srv.migrationCreate, "POST", "/db/"+id+"/migrations/new", newMig, admPrincipal(editor, false), id)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("view+edit membuat migration: %d %s", rr.Code, admBody(rr))
+	}
+
+	loc := rr.Header().Get("Location")
+	mid := loc[strings.LastIndex(loc, "/")+1:]
+	req := httptest.NewRequest("POST", loc+"/execute", nil)
+	req = req.WithContext(reqctx.WithPrincipal(req.Context(), *admPrincipal(viewer, false)))
+	req.SetPathValue("id", id)
+	req.SetPathValue("mid", mid)
+	rr = httptest.NewRecorder()
+	e.srv.migrationExecute(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("view only mengeksekusi migration harus 403, dapat %d", rr.Code)
+	}
+	var status string
+	if err := e.db.QueryRow(ctx, `SELECT status FROM migrations WHERE id = $1`, mid).Scan(&status); err != nil || status != "draft" {
+		t.Errorf("migration harus tetap draft, dapat %q (err %v)", status, err)
 	}
 
 	// Tanpa grant, dan Platform Admin tanpa grant: ditolak walau bisa membuka halaman admin
