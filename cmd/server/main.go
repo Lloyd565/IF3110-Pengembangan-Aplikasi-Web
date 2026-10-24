@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/joho/godotenv"
 
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/admin"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/auth"
@@ -23,6 +26,13 @@ import (
 )
 
 func main() {
+	// Production hanya memakai env asli; .env khusus pengembangan lokal.
+	if os.Getenv("APP_ENV") != "production" {
+		if err := godotenv.Load(); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			log.Fatalf("gagal membaca .env: %v", err)
+		}
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal(err)
@@ -50,8 +60,6 @@ func main() {
 		log.Printf("PERINGATAN: %d migration yang terputus ditandai failed; periksa Target DB secara manual", n)
 	}
 
-	// Kunci enkripsi password koneksi database target. Wajib di production;
-	// di development hanya peringatan (login tetap jalan, tapi koneksi tidak bisa dibuat/dibuka).
 	encKey, err := dbconn.ParseKey(os.Getenv("ENCRYPTION_KEY"))
 	if err != nil {
 		if cfg.Production {
