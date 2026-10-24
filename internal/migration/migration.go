@@ -63,7 +63,7 @@ func Validate(name, sql string) (string, string, error) {
 	case len(sql) > maxSQLBytes:
 		return name, sql, ValidationError("SQL migration maksimal 100 KB.")
 	}
-	return name, sql, nil
+	return name, sql, CheckTransactional(sql)
 }
 
 const selectSQL = `
