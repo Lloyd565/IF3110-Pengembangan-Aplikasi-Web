@@ -7,7 +7,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -33,7 +32,6 @@ type ValidationError string
 func (e ValidationError) Error() string { return string(e) }
 
 type Migration struct {
-	DBMS           dbconn.DBMS
 	ID             int64
 	ConnectionID   uuid.UUID
 	Version        *int
@@ -54,14 +52,6 @@ type Migration struct {
 func (m *Migration) IsDraft() bool { return m.Status == StatusDraft }
 
 func Validate(name, sql string) (string, string, error) {
-	name, sql, err := validateInput(name, sql)
-	if err != nil {
-		return name, sql, err
-	}
-	return name, sql, CheckTransactional(sql)
-}
-
-func validateInput(name, sql string) (string, string, error) {
 	name = strings.TrimSpace(name)
 	switch {
 	case name == "":
@@ -73,37 +63,14 @@ func validateInput(name, sql string) (string, string, error) {
 	case len(sql) > maxSQLBytes:
 		return name, sql, ValidationError("SQL migration maksimal 100 KB.")
 	}
-	return name, sql, nil
-}
-
-func validateConnection(ctx context.Context, db *pgxpool.Pool, connID uuid.UUID, name, sql string) (string, string, error) {
-	name, sql, err := validateInput(name, sql)
-	if err != nil {
-		return name, sql, err
-	}
-	var kind dbconn.DBMS
-	var database string
-	err = db.QueryRow(ctx, `SELECT dbms,dbname FROM db_connections WHERE id=$1 AND deleted_at IS NULL`, connID).Scan(&kind, &database)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return name, sql, ErrNotFound
-	}
-	if err != nil {
-		return name, sql, err
-	}
-	if kind == dbconn.MariaDB {
-		err = checkMariaDatabase(sql, database)
-	} else {
-		err = CheckTransactional(sql)
-	}
-	return name, sql, err
+	return name, sql, CheckTransactional(sql)
 }
 
 const selectSQL = `
 	SELECT m.id, m.connection_id, m.version, m.name, m.sql, m.status, m.error_message,
 	       m.created_by, cu.username::text, m.executed_by, eu.username::text,
-	       m.created_at, m.updated_at, m.started_at, m.finished_at, dc.dbms
+	       m.created_at, m.updated_at, m.started_at, m.finished_at
 	FROM migrations m
-	JOIN db_connections dc ON dc.id = m.connection_id
 	JOIN users cu ON cu.id = m.created_by
 	LEFT JOIN users eu ON eu.id = m.executed_by`
 
@@ -111,7 +78,7 @@ func scan(row pgx.Row) (*Migration, error) {
 	var m Migration
 	err := row.Scan(&m.ID, &m.ConnectionID, &m.Version, &m.Name, &m.SQL, &m.Status, &m.ErrorMessage,
 		&m.CreatedBy, &m.CreatedByName, &m.ExecutedBy, &m.ExecutedByName,
-		&m.CreatedAt, &m.UpdatedAt, &m.StartedAt, &m.FinishedAt, &m.DBMS)
+		&m.CreatedAt, &m.UpdatedAt, &m.StartedAt, &m.FinishedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -142,7 +109,7 @@ func Get(ctx context.Context, db *pgxpool.Pool, connID uuid.UUID, id int64) (*Mi
 }
 
 func CreateDraft(ctx context.Context, db *pgxpool.Pool, connID uuid.UUID, userID int64, name, sql string) (int64, error) {
-	name, sql, err := validateConnection(ctx, db, connID, name, sql)
+	name, sql, err := Validate(name, sql)
 	if err != nil {
 		return 0, err
 	}
@@ -154,7 +121,7 @@ func CreateDraft(ctx context.Context, db *pgxpool.Pool, connID uuid.UUID, userID
 }
 
 func UpdateDraft(ctx context.Context, db *pgxpool.Pool, connID uuid.UUID, id int64, name, sql string) error {
-	name, sql, err := validateConnection(ctx, db, connID, name, sql)
+	name, sql, err := Validate(name, sql)
 	if err != nil {
 		return err
 	}

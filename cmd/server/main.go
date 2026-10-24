@@ -61,7 +61,6 @@ func main() {
 	}
 
 	conns := &dbconn.Registry{DB: pool, Key: encKey}
-	defer conns.Close()
 	srv := &httpx.Server{
 		PublicOrigin: cfg.PublicOrigin,
 		DB:           pool,

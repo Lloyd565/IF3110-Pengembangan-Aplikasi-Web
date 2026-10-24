@@ -22,7 +22,7 @@
   <label for="sql">SQL</label>
   <textarea id="sql" name="sql" rows="16" required spellcheck="false"
             placeholder="ALTER TABLE shop.customers ADD COLUMN phone text;">{{.Data.SQL}}</textarea>
-  <p class="muted">PostgreSQL menjalankan SQL dalam satu transaksi. Pada MariaDB, gunakan satu DDL per migration atau batch DML pada InnoDB; campuran DDL dan DML ditolak karena implicit commit.</p>
+  <p class="muted">SQL dijalankan dalam satu transaksi saat dieksekusi. Kalau ada error, semua perubahan dibatalkan.</p>
 
   <div class="actions">
     <button type="submit">Simpan draft</button>

@@ -7,9 +7,9 @@ import (
 	"strconv"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/authz"
-	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/explorer"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
 )
@@ -39,12 +39,12 @@ func (s *Server) can(r *http.Request, p reqctx.Principal, connID uuid.UUID, act 
 	return s.Authz.Can(r.Context(), p, connID, act) == nil
 }
 
-func (s *Server) dbAccess(w http.ResponseWriter, r *http.Request, act authz.Action) (connID uuid.UUID, pool *dbconn.Target, ok bool) {
+func (s *Server) dbAccess(w http.ResponseWriter, r *http.Request, act authz.Action) (connID uuid.UUID, pool *pgxpool.Pool, ok bool) {
 	connID, _, ok = s.dbAuthorize(w, r, act)
 	if !ok {
 		return
 	}
-	pool, err := s.Conns.Target(r.Context(), connID)
+	pool, err := s.Conns.Pool(r.Context(), connID)
 	if err != nil {
 		log.Printf("pool %s: %v", connID, err)
 		s.renderError(w, r, http.StatusBadGateway, "Database target tidak dapat dihubungi.")
@@ -67,7 +67,7 @@ func (s *Server) dbSchema(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	schemas, err := explorer.ListTargetSchemas(r.Context(), pool)
+	schemas, err := explorer.ListSchemas(r.Context(), pool)
 	if err != nil {
 		s.explorerError(w, r, err)
 		return
@@ -83,7 +83,7 @@ func (s *Server) dbTable(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	table, err := explorer.DescribeTargetTable(r.Context(), pool, r.PathValue("schema"), r.PathValue("table"))
+	table, err := explorer.DescribeTable(r.Context(), pool, r.PathValue("schema"), r.PathValue("table"))
 	if err != nil {
 		s.explorerError(w, r, err)
 		return
@@ -104,7 +104,7 @@ func (s *Server) dbData(w http.ResponseWriter, r *http.Request) {
 		page = 1
 	}
 	schema, table := r.PathValue("schema"), r.PathValue("table")
-	data, err := explorer.ReadTargetData(r.Context(), pool, schema, table, page)
+	data, err := explorer.ReadData(r.Context(), pool, schema, table, page)
 	if err != nil {
 		s.explorerError(w, r, err)
 		return

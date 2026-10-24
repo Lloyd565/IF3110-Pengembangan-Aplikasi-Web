@@ -26,7 +26,6 @@ type Params struct {
 	Username string
 	Password string
 	SSLMode  string
-	DBMS     DBMS
 }
 
 func (p Params) url() string {
@@ -46,10 +45,6 @@ func (p Params) url() string {
 
 // Connect membuka pool kecil ke Target DB dan memastikan koneksinya hidup.
 func Connect(ctx context.Context, p Params) (*pgxpool.Pool, error) {
-	kind, err := NormalizeDBMS(p.DBMS)
-	if err != nil || kind != PostgreSQL {
-		return nil, errors.New("dbconn: gunakan ConnectTarget untuk koneksi non-PostgreSQL")
-	}
 	cfg, err := pgxpool.ParseConfig(p.url())
 	if err != nil {
 		return nil, errors.New("dbconn: parameter koneksi tidak valid")
@@ -72,7 +67,7 @@ func Connect(ctx context.Context, p Params) (*pgxpool.Pool, error) {
 
 // Check: untuk tombol "Test connection". Tidak menyimpan apa pun.
 func Check(ctx context.Context, p Params) error {
-	pool, err := ConnectTarget(ctx, p)
+	pool, err := Connect(ctx, p)
 	if err != nil {
 		return err
 	}
@@ -84,13 +79,13 @@ func Check(ctx context.Context, p Params) error {
 // Platform DB dan didekripsi saat pool pertama kali dibuat.
 type Registry struct {
 	DB  *pgxpool.Pool
-	Key []byte
+	Key []byte 
 
 	keyOnce sync.Once
 	keyErr  error
 
 	mu    sync.Mutex
-	pools map[uuid.UUID]*Target
+	pools map[uuid.UUID]*pgxpool.Pool
 	dev   *pgxpool.Pool
 }
 
@@ -116,17 +111,6 @@ func (r *Registry) Seal(connID uuid.UUID, password string) ([]byte, error) {
 }
 
 func (r *Registry) Pool(ctx context.Context, connID uuid.UUID) (*pgxpool.Pool, error) {
-	target, err := r.Target(ctx, connID)
-	if err != nil {
-		return nil, err
-	}
-	if target.DBMS != PostgreSQL {
-		return nil, errors.New("dbconn: koneksi ini bukan PostgreSQL")
-	}
-	return target.Postgres, nil
-}
-
-func (r *Registry) Target(ctx context.Context, connID uuid.UUID) (*Target, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -137,15 +121,11 @@ func (r *Registry) Target(ctx context.Context, connID uuid.UUID) (*Target, error
 	var p Params
 	var enc []byte
 	err := r.DB.QueryRow(ctx, `
-		SELECT host, port, dbname, username, password_enc, sslmode, dbms
+		SELECT host, port, dbname, username, password_enc, sslmode
 		FROM db_connections WHERE id = $1 AND deleted_at IS NULL`, connID,
-	).Scan(&p.Host, &p.Port, &p.DBName, &p.Username, &enc, &p.SSLMode, &p.DBMS)
+	).Scan(&p.Host, &p.Port, &p.DBName, &p.Username, &enc, &p.SSLMode)
 	if errors.Is(err, pgx.ErrNoRows) {
-		pool, err := r.devFallback()
-		if err != nil {
-			return nil, err
-		}
-		return &Target{DBMS: PostgreSQL, Postgres: pool}, nil
+		return r.devFallback()
 	}
 	if err != nil {
 		return nil, fmt.Errorf("dbconn: baca koneksi: %w", err)
@@ -158,28 +138,15 @@ func (r *Registry) Target(ctx context.Context, connID uuid.UUID) (*Target, error
 	if p.Password, err = Decrypt(key, connID, enc); err != nil {
 		return nil, err
 	}
-	pool, err := ConnectTarget(ctx, p)
+	pool, err := Connect(ctx, p)
 	if err != nil {
 		return nil, err
 	}
 	if r.pools == nil {
-		r.pools = map[uuid.UUID]*Target{}
+		r.pools = map[uuid.UUID]*pgxpool.Pool{}
 	}
 	r.pools[connID] = pool
 	return pool, nil
-}
-
-func (r *Registry) Close() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for id, target := range r.pools {
-		target.Close()
-		delete(r.pools, id)
-	}
-	if r.dev != nil {
-		r.dev.Close()
-		r.dev = nil
-	}
 }
 
 func (r *Registry) devFallback() (*pgxpool.Pool, error) {
@@ -203,6 +170,6 @@ func (r *Registry) Invalidate(connID uuid.UUID) {
 	defer r.mu.Unlock()
 	if p := r.pools[connID]; p != nil {
 		delete(r.pools, connID)
-		go p.Close()
+		go p.Close() 
 	}
 }

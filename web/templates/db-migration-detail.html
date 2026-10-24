@@ -24,13 +24,12 @@
 </div>
 
 <section class="card status-card status-{{$m.Status}}">
-  <p class="muted">DBMS: {{$m.DBMS}}{{if eq $m.DBMS "mariadb"}}. DDL dijalankan sebagai satu statement atomic, sedangkan batch DML menggunakan transaksi InnoDB.{{end}}</p>
   <h2>Status <span class="badge badge-{{$m.Status}}">{{$m.Status}}</span></h2>
   {{if eq $m.Status "draft"}}<p class="muted">Belum dieksekusi. Draft masih bisa diubah.</p>{{end}}
   {{if eq $m.Status "running"}}<p class="muted">Sedang dijalankan di database target.</p>{{end}}
   {{if eq $m.Status "success"}}<p>Berhasil dijalankan dan di-commit.</p>{{end}}
   {{if eq $m.Status "failed"}}
-    {{if eq $m.DBMS "mariadb"}}<p>Eksekusi gagal. DML InnoDB dibatalkan; DDL mengikuti atomic DDL MariaDB. Jika koneksi terputus atau server berhenti, periksa kondisi target sebelum membuat migration baru.</p>{{else}}<p>Gagal dan di-rollback. Database target tidak berubah.</p>{{end}}
+    <p>Gagal dan di-rollback. Database target tidak berubah.</p>
     {{with $m.ErrorMessage}}<pre class="error-message">{{.}}</pre>{{end}}
   {{end}}
 </section>
@@ -43,7 +42,7 @@
 {{if and $m.IsDraft .Data.CanExecute}}
 <section class="card" id="plan">
   <h2>Execution plan</h2>
-  <p class="muted">Analisis dijalankan dalam transaksi yang selalu di-rollback. Dengan ANALYZE, query benar-benar dijalankan untuk mengukur waktu dan jumlah row aktual. MariaDB menampilkan plan JSON native dan hanya mendukung analisis DML; DDL ditolak agar tidak menimbulkan implicit commit.</p>
+  <p class="muted">Menjalankan EXPLAIN untuk tiap statement di database target dalam transaksi yang selalu di-rollback, jadi data dan skema tidak berubah. Dengan ANALYZE, query benar-benar dijalankan untuk mengukur waktu dan jumlah row aktual.</p>
   <form method="post" action="/db/{{$id}}/migrations/{{$m.ID}}/explain#plan" class="plan-form">
     <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
     <label><input type="checkbox" name="analyze" value="1" {{with .Data.Plan}}{{if .Analyze}}checked{{end}}{{end}}> EXPLAIN ANALYZE</label>
@@ -56,8 +55,6 @@
   <pre class="sql">{{$st.SQL}}</pre>
   {{if not $st.Explained}}
     <p class="muted">Bukan query DML, jadi tidak punya execution plan. Statement tetap dijalankan agar statement berikutnya melihat perubahan skema.</p>
-  {{else if $st.RawJSON}}
-    <pre class="sql">{{$st.RawJSON}}</pre>
   {{else}}
   <div class="plan-scroll">
   <table class="plan">
