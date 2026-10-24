@@ -89,6 +89,7 @@ func (s *Server) Routes() http.Handler {
 	protected("GET /db/{id}/migrations/{mid}/edit", s.migrationEditForm)
 	protected("POST /db/{id}/migrations/{mid}/edit", s.migrationUpdate)
 	protected("POST /db/{id}/migrations/{mid}/execute", s.migrationExecute)
+	protected("POST /db/{id}/migrations/{mid}/explain", s.migrationExplain)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusNotFound, "Halaman tidak ditemukan.")
 	})

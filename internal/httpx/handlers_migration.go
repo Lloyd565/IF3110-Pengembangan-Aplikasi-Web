@@ -70,18 +70,60 @@ func (s *Server) migrationDetail(w http.ResponseWriter, r *http.Request) {
 		s.migrationError(w, r, migration.ErrNotFound)
 		return
 	}
+	s.renderDetail(w, r, p, connID, id, nil)
+}
+
+func (s *Server) renderDetail(w http.ResponseWriter, r *http.Request, p reqctx.Principal, connID uuid.UUID, id int64, extra map[string]any) {
 	m, err := migration.Get(r.Context(), s.DB, connID, id)
 	if err != nil {
 		s.migrationError(w, r, err)
 		return
 	}
-	s.render(w, r, http.StatusOK, "db-migration-detail.html", map[string]any{
+	data := map[string]any{
 		"ConnID":     connID,
 		"M":          m,
 		"CanUpdate":  s.can(r, p, connID, authz.MigrationUpdate),
 		"CanExecute": s.can(r, p, connID, authz.MigrationExecute),
 		"CanCreate":  s.can(r, p, connID, authz.MigrationCreate),
-	})
+	}
+	for k, v := range extra {
+		data[k] = v
+	}
+	s.render(w, r, http.StatusOK, "db-migration-detail.html", data)
+}
+
+func (s *Server) migrationExplain(w http.ResponseWriter, r *http.Request) {
+	connID, target, ok := s.dbAccess(w, r, authz.MigrationExecute)
+	if !ok {
+		return
+	}
+	id, valid := migrationID(r)
+	if !valid {
+		s.migrationError(w, r, migration.ErrNotFound)
+		return
+	}
+	p, _ := reqctx.CurrentPrincipal(r.Context())
+	m, err := migration.Get(r.Context(), s.DB, connID, id)
+	if err == nil && !m.IsDraft() {
+		err = migration.ErrNotDraft
+	}
+	if err != nil {
+		s.migrationError(w, r, err)
+		return
+	}
+	plan, err := migration.Explain(r.Context(), target, m.SQL, r.PostFormValue("analyze") == "1")
+	var ve migration.ValidationError
+	switch {
+	case err == nil:
+		s.renderDetail(w, r, p, connID, id, map[string]any{"Plan": plan})
+	case errors.As(err, &ve):
+		s.renderDetail(w, r, p, connID, id, map[string]any{"PlanError": ve.Error()})
+	case errors.Is(err, migration.ErrTargetUnavailable):
+		log.Printf("explain %s/%d: %v", connID, id, err)
+		s.renderError(w, r, http.StatusBadGateway, "Database target tidak dapat dihubungi.")
+	default:
+		s.migrationError(w, r, err)
+	}
 }
 
 func (s *Server) migrationNewForm(w http.ResponseWriter, r *http.Request) {
