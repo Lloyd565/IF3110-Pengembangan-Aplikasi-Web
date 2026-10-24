@@ -3,27 +3,14 @@ package platformdb
 import (
 	"context"
 	"io/fs"
-	"os"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/testdb"
 )
 
 func TestMigrate(t *testing.T) {
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL belum diset")
-	}
+	db := testdb.Fresh(t, "platformdb")
 	ctx := context.Background()
-	db, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	if _, err := db.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
-		t.Fatal(err)
-	}
 
 	for i := range 2 {
 		if err := Migrate(ctx, db); err != nil {

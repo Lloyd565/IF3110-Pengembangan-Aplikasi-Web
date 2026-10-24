@@ -8,25 +8,18 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/testdb"
 )
 
 func seededDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL belum diset")
-	}
+	db := testdb.Fresh(t, "explorer")
 	seed, err := os.ReadFile("../../scripts/target-seed.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.Background()
-	db, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(db.Close)
-	if _, err := db.Exec(ctx, string(seed)); err != nil {
+	if _, err := db.Exec(context.Background(), string(seed)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	return db
