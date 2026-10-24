@@ -1,0 +1,58 @@
+{{define "title"}}{{.Data.Table.Schema}}.{{.Data.Table.Name}}{{end}}
+{{define "content"}}
+{{$id := .Data.ConnID}}{{$t := .Data.Table}}
+<nav class="crumbs">
+  <a href="/dashboard">Dashboard</a> /
+  <a href="/db/{{$id}}/schema">Schema</a> /
+  {{$t.Schema}}.{{$t.Name}}
+</nav>
+<div class="page-head">
+  <h1>Explorer Tabel <span class="muted">{{$t.Schema}}.{{$t.Name}} · {{$t.Kind}}</span></h1>
+  <a class="button" href="/db/{{$id}}/data/{{pathEscape $t.Schema}}/{{pathEscape $t.Name}}">Lihat data</a>
+</div>
+
+<section class="card">
+  <h2>Kolom dan tipe</h2>
+  <table>
+    <thead><tr><th>Kolom</th><th>Tipe</th><th>Null</th><th>Default</th></tr></thead>
+    <tbody>
+    {{range $t.Columns}}
+      <tr>
+        <td><code>{{.Name}}</code></td>
+        <td><code>{{.Type}}</code></td>
+        <td>{{if .Nullable}}ya{{else}}tidak{{end}}</td>
+        <td><code>{{.Default}}</code></td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>Constraint</h2>
+  {{if $t.Constraints}}
+  <table>
+    <thead><tr><th>Nama</th><th>Jenis</th><th>Definisi</th></tr></thead>
+    <tbody>
+    {{range $t.Constraints}}
+      <tr><td><code>{{.Name}}</code></td><td>{{.Type}}</td><td><code>{{.Definition}}</code></td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}<p class="muted">Tidak ada constraint.</p>{{end}}
+</section>
+
+<section class="card">
+  <h2>Index</h2>
+  {{if $t.Indexes}}
+  <table>
+    <thead><tr><th>Nama</th><th>Definisi</th></tr></thead>
+    <tbody>
+    {{range $t.Indexes}}
+      <tr><td><code>{{.Name}}</code></td><td><code>{{.Definition}}</code></td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}<p class="muted">Tidak ada index.</p>{{end}}
+</section>
+{{end}}
