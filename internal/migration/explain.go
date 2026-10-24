@@ -39,6 +39,7 @@ type StatementPlan struct {
 	Nodes         []PlanNode
 	PlanningTime  float64
 	ExecutionTime float64
+	RawJSON       string
 }
 
 type Plan struct {
