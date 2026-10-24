@@ -1,0 +1,33 @@
+/* Tambahan untuk halaman Platform Admin. Memakai variabel dari app.css. */
+.ok {
+  padding: 10px 14px;
+  border: 1px solid var(--success);
+  border-radius: 6px;
+  background: #f1fbf3;
+  color: #256f36;
+}
+
+.admin-nav { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 12px; }
+.admin-nav a[aria-current="page"] { font-weight: 700; color: var(--text); text-decoration: none; }
+
+.admin input[type=text], .admin input[type=password], .admin input[type=number], .admin select {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.row-form { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin: 0; }
+.row-form label { display: flex; flex-direction: column; gap: 4px; font-weight: 600; }
+.row-form label.check { flex-direction: row; align-items: center; gap: 6px; font-weight: normal; }
+
+.admin form.inline { display: inline-flex; gap: 6px; align-items: center; margin: 0 8px 4px 0; }
+.admin button.secondary { background: #fff; color: var(--primary); }
+.admin button.danger { background: var(--danger); border-color: var(--danger); }
+
+.badge-view { background: #1c7ed6; }
+.badge-edit { background: var(--accent); }
+.badge-admin { background: var(--primary); }
+
+.admin td.actions-cell { white-space: nowrap; }
