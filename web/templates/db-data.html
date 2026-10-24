@@ -1,0 +1,34 @@
+{{define "title"}}Data {{.Data.Schema}}.{{.Data.Table}}{{end}}
+{{define "content"}}
+{{$id := .Data.ConnID}}{{$p := .Data.Page}}
+{{$base := printf "/db/%s/data/%s/%s" $id (pathEscape .Data.Schema) (pathEscape .Data.Table)}}
+<nav class="crumbs">
+  <a href="/dashboard">Dashboard</a> /
+  <a href="/db/{{$id}}/schema">Schema</a> /
+  <a href="/db/{{$id}}/tables/{{pathEscape .Data.Schema}}/{{pathEscape .Data.Table}}">{{.Data.Schema}}.{{.Data.Table}}</a> /
+  Data
+</nav>
+<div class="page-head">
+  <h1>Explorer Data <span class="muted">{{.Data.Schema}}.{{.Data.Table}} · halaman {{$p.Page}}</span></h1>
+</div>
+
+<section class="card scroll">
+  {{if $p.Rows}}
+  <table class="data">
+    <thead><tr>{{range $p.Columns}}<th>{{.}}</th>{{end}}</tr></thead>
+    <tbody>
+    {{range $p.Rows}}
+      <tr>{{range .}}<td>{{if .Null}}<span class="null">NULL</span>{{else}}{{.Value}}{{end}}</td>{{end}}</tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="muted">Tidak ada baris di halaman ini.</p>
+  {{end}}
+</section>
+
+<div class="pager">
+  {{if gt $p.Page 1}}<a class="button secondary" href="{{$base}}?page={{.Data.PrevPage}}">Halaman sebelumnya</a>{{end}}
+  {{if $p.HasNext}}<a class="button" href="{{$base}}?page={{.Data.NextPage}}">Halaman berikutnya</a>{{end}}
+</div>
+{{end}}

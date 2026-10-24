@@ -1,6 +1,3 @@
-// Package reqctx menyimpan identitas request di context (owner: A).
-// Dipisah dari httpx supaya authz bisa memakainya tanpa import cycle
-// (httpx → authz → httpx).
 package reqctx
 
 import "context"
@@ -31,7 +28,6 @@ func WithCSRFToken(ctx context.Context, tok string) context.Context {
 	return context.WithValue(ctx, csrfKey, tok)
 }
 
-// CSRFToken mengembalikan token untuk dirender ke <input type="hidden" name="csrf_token">.
 func CSRFToken(ctx context.Context) string {
 	tok, _ := ctx.Value(csrfKey).(string)
 	return tok

@@ -9,9 +9,6 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
 )
 
-// devPrincipal menyuntikkan Principal palsu dari env DEV_USER_ID agar B dan C
-// tidak menunggu A. Tanpa env tersebut, middleware ini tidak melakukan apa-apa.
-// TODO(A): hapus file ini setelah middleware session jadi.
 func devPrincipal(next http.Handler) http.Handler {
 	id, err := strconv.ParseInt(os.Getenv("DEV_USER_ID"), 10, 64)
 	if err != nil {
