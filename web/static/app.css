@@ -128,7 +128,7 @@ pre.error-message { color: var(--danger); }
 
 .editor { display: flex; flex-direction: column; gap: 8px; }
 .editor label { font-weight: 600; }
-.editor input[type=text], .editor textarea {
+.editor input[type=text], .editor textarea, .editor select {
   font: inherit;
   padding: 8px 10px;
   border: 1px solid var(--border);

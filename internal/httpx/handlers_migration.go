@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -53,7 +54,25 @@ func (s *Server) migrationList(w http.ResponseWriter, r *http.Request) {
 		s.migrationError(w, r, err)
 		return
 	}
+	var generated []migration.Migration
+	parts := strings.Split(r.URL.Query().Get("generated"), ",")
+	if len(parts) <= 250 {
+		byID := map[int64]migration.Migration{}
+		for _, m := range list {
+			byID[m.ID] = m
+		}
+		seen := map[int64]bool{}
+		for _, part := range parts {
+			if id, err := strconv.ParseInt(part, 10, 64); err == nil && !seen[id] {
+				if m, ok := byID[id]; ok {
+					generated = append(generated, m)
+					seen[id] = true
+				}
+			}
+		}
+	}
 	s.render(w, r, http.StatusOK, "db-migrations.html", map[string]any{
+		"Generated":  generated,
 		"ConnID":     connID,
 		"Migrations": list,
 		"CanCreate":  s.can(r, p, connID, authz.MigrationCreate),

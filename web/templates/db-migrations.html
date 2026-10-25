@@ -8,8 +8,15 @@
 </nav>
 <div class="page-head">
   <h1>Riwayat Migration</h1>
-  {{if .Data.CanCreate}}<a class="button" href="/db/{{$id}}/migrations/new">Draft baru</a>{{end}}
+  <div class="actions"><a class="button secondary" href="/db/{{$id}}/schema/diff">Schema diff</a>{{if .Data.CanCreate}}<a class="button" href="/db/{{$id}}/migrations/new">Draft baru</a>{{end}}</div>
 </div>
+
+{{with .Data.Generated}}
+<section class="card"><h2>Draft hasil schema diff: urutan pengerjaan</h2>
+<p>Tinjau dan edit setiap draft, lalu eksekusi sesuai urutan daftar ini. Draft berikutnya dapat bergantung pada perubahan sebelumnya; batch MariaDB tidak merupakan satu transaksi gabungan.</p>
+<ol>{{range .}}<li><a href="/db/{{$id}}/migrations/{{.ID}}/edit">{{.Name}}</a> <span class="badge badge-{{.Status}}">{{.Status}}</span> · <a href="/db/{{$id}}/migrations/{{.ID}}">Detail</a></li>{{end}}</ol>
+</section>
+{{end}}
 
 <section class="card">
   {{if .Data.Migrations}}

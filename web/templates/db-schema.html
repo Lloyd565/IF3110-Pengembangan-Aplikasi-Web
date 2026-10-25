@@ -4,7 +4,7 @@
 <nav class="crumbs"><a href="/dashboard">Dashboard</a> / Schema</nav>
 <div class="page-head">
   <h1>Explorer Schema</h1>
-  <a class="button secondary" href="/db/{{$id}}/migrations">Riwayat migration</a>
+  <div class="actions"><a class="button secondary" href="/db/{{$id}}/schema/diff">Schema diff</a><a class="button secondary" href="/db/{{$id}}/migrations">Riwayat migration</a></div>
 </div>
 {{range .Data.Schemas}}
 <section class="card">
