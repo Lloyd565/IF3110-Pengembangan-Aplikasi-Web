@@ -267,7 +267,7 @@ func mariaSQL(source string) ([]mariaStatement, bool, error) {
 			if (hasPrefixWord(n, "drop table") || hasPrefixWord(n, "drop view") || hasPrefixWord(n, "rename table")) && strings.Contains(n, ",") {
 				return nil, false, ValidationError("MariaDB: operasi DROP/RENAME dibatasi satu objek per migration.")
 			}
-			if hasPrefixWord(n, "create table") && (strings.Contains(" "+n+" ", " select ") || strings.Contains(" "+n+" ", " like ")) {
+			if hasPrefixWord(n, "create table") && (strings.Contains(" "+n+" ", " select ") || createTableLike(st.Tokens)) {
 				return nil, false, ValidationError("MariaDB: CREATE TABLE AS SELECT/LIKE tidak didukung; pisahkan schema dan data.")
 			}
 			for _, engine := range mariaEngine.FindAllStringSubmatch(n, -1) {
@@ -295,6 +295,24 @@ func mariaSQL(source string) ([]mariaStatement, bool, error) {
 }
 
 func checkMariaSQL(source string) error { _, _, err := mariaSQL(source); return err }
+
+func createTableLike(tokens []mariaToken) bool {
+	keyword := func(i int, word string) bool {
+		return i < len(tokens) && !tokens[i].quoted && strings.EqualFold(tokens[i].text, word)
+	}
+	i := 2
+	if keyword(i, "if") && keyword(i+1, "not") && keyword(i+2, "exists") {
+		i += 3
+	}
+	i++
+	if i+1 < len(tokens) && tokens[i].text == "." {
+		i += 2
+	}
+	if i < len(tokens) && tokens[i].text == "(" {
+		i++
+	}
+	return keyword(i, "like")
+}
 
 func ExecuteTarget(ctx context.Context, platform *pgxpool.Pool, target *dbconn.Target, connID uuid.UUID, id, userID int64) error {
 	if target.DBMS == dbconn.PostgreSQL {
