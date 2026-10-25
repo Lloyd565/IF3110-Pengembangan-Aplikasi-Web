@@ -24,9 +24,23 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      mariadb-test:
+        image: mariadb:12.2
+        env:
+          MARIADB_ROOT_PASSWORD: test
+          MARIADB_ROOT_HOST: "%"
+          MARIADB_DATABASE: test
+        ports:
+          - 3308:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
     env:
       TEST_DATABASE_URL: postgres://test:test@localhost:5435/test?sslmode=disable
+      TEST_MARIADB_DSN: root:test@tcp(127.0.0.1:3308)/
 
     steps:
       - uses: actions/checkout@v4
