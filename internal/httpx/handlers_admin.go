@@ -215,11 +215,14 @@ func (s *Server) renderGroups(w http.ResponseWriter, r *http.Request, actErr err
 
 // ---- /admin/connections ----
 
-type adminConnForm struct{ Name, Host, Port, DBName, Username, SSLMode string }
+type adminConnForm struct {
+	Name, Host, Port, DBName, Username, SSLMode string
+	DBMS                                        dbconn.DBMS
+}
 
 func (f adminConnForm) params(password string) dbconn.Params {
 	port, _ := strconv.Atoi(f.Port) // tidak valid -> 0 -> ditolak validasi service
-	return dbconn.Params{Host: f.Host, Port: port, DBName: f.DBName, Username: f.Username, Password: password, SSLMode: f.SSLMode}
+	return dbconn.Params{Host: f.Host, Port: port, DBName: f.DBName, Username: f.Username, Password: password, SSLMode: f.SSLMode, DBMS: f.DBMS}
 }
 
 func (s *Server) adminConnections(w http.ResponseWriter, r *http.Request) {
@@ -230,6 +233,7 @@ func (s *Server) adminConnections(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		ctx := r.Context()
 		form := adminConnForm{
+			DBMS: dbconn.DBMS(r.PostFormValue("dbms")),
 			Name: r.PostFormValue("name"), Host: r.PostFormValue("host"), Port: r.PostFormValue("port"),
 			DBName: r.PostFormValue("dbname"), Username: r.PostFormValue("username"), SSLMode: r.PostFormValue("sslmode"),
 		}
@@ -282,9 +286,9 @@ func (s *Server) renderConnections(w http.ResponseWriter, r *http.Request, fl ad
 			edit = &conns[i]
 		}
 	}
-	f := adminConnForm{Port: "5432", SSLMode: "disable"}
+	f := adminConnForm{Port: "5432", SSLMode: "disable", DBMS: dbconn.PostgreSQL}
 	if edit != nil {
-		f = adminConnForm{edit.Name, edit.Host, strconv.Itoa(edit.Port), edit.DBName, edit.Username, edit.SSLMode}
+		f = adminConnForm{Name: edit.Name, Host: edit.Host, Port: strconv.Itoa(edit.Port), DBName: edit.DBName, Username: edit.Username, SSLMode: edit.SSLMode, DBMS: edit.DBMS}
 	}
 	if form != nil {
 		f = *form

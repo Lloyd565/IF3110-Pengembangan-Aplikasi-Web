@@ -32,7 +32,7 @@ type Service struct {
 	Users    *user.Repo
 	Sessions *auth.Sessions
 	Conns    *dbconn.Registry
-	Hash     func(password string) (string, error) 
+	Hash     func(password string) (string, error)
 }
 
 func invalid(format string, a ...any) error {
@@ -258,6 +258,7 @@ type Connection struct {
 	DBName   string
 	Username string
 	SSLMode  string // password sengaja tidak pernah ikut keluar
+	DBMS     dbconn.DBMS
 }
 
 var sslModes = map[string]bool{
@@ -265,6 +266,11 @@ var sslModes = map[string]bool{
 }
 
 func normalize(name string, p *dbconn.Params) error {
+	kind, err := dbconn.NormalizeDBMS(p.DBMS)
+	if err != nil {
+		return invalid("DBMS tidak dikenal")
+	}
+	p.DBMS = kind
 	if strings.TrimSpace(name) == "" {
 		return invalid("nama koneksi wajib diisi")
 	}
@@ -279,6 +285,9 @@ func normalize(name string, p *dbconn.Params) error {
 	}
 	if !sslModes[p.SSLMode] {
 		return invalid("sslmode tidak dikenal")
+	}
+	if p.DBMS == dbconn.MariaDB && p.SSLMode != "disable" && p.SSLMode != "require" && p.SSLMode != "verify-full" {
+		return invalid("MariaDB mendukung SSL disable, require, atau verify-full")
 	}
 	return nil
 }
@@ -296,9 +305,9 @@ func (s *Service) CreateConnection(ctx context.Context, actor int64, name string
 		return uuid.Nil, err
 	}
 	_, err = s.DB.Exec(ctx, `
-		INSERT INTO db_connections (id, name, host, port, dbname, username, password_enc, sslmode, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		id, name, p.Host, p.Port, p.DBName, p.Username, enc, p.SSLMode, actor)
+		INSERT INTO db_connections (id, name, host, port, dbname, username, password_enc, sslmode, created_by, dbms)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		id, name, p.Host, p.Port, p.DBName, p.Username, enc, p.SSLMode, actor, p.DBMS)
 	if pgCode(err) == "23505" {
 		return uuid.Nil, invalid("nama koneksi sudah dipakai")
 	}
@@ -314,8 +323,18 @@ func (s *Service) UpdateConnection(ctx context.Context, actor int64, id uuid.UUI
 	if err := normalize(name, &p); err != nil {
 		return err
 	}
+	var oldDBMS dbconn.DBMS
+	err := s.DB.QueryRow(ctx, `SELECT dbms FROM db_connections WHERE id=$1 AND deleted_at IS NULL`, id).Scan(&oldDBMS)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if oldDBMS != p.DBMS {
+		return invalid("jenis DBMS tidak dapat diubah; buat koneksi baru")
+	}
 	var tag pgconn.CommandTag
-	var err error
 	if p.Password == "" {
 		tag, err = s.DB.Exec(ctx, `
 			UPDATE db_connections SET name=$2, host=$3, port=$4, dbname=$5, username=$6, sslmode=$7, updated_at=now()
@@ -361,7 +380,7 @@ func (s *Service) DeleteConnection(ctx context.Context, actor int64, id uuid.UUI
 
 func (s *Service) ListConnections(ctx context.Context) ([]Connection, error) {
 	rows, err := s.DB.Query(ctx, `
-		SELECT id, name, host, port, dbname, username, sslmode
+		SELECT id, name, host, port, dbname, username, sslmode, dbms
 		FROM db_connections WHERE deleted_at IS NULL ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -370,7 +389,7 @@ func (s *Service) ListConnections(ctx context.Context) ([]Connection, error) {
 	var out []Connection
 	for rows.Next() {
 		var c Connection
-		if err := rows.Scan(&c.ID, &c.Name, &c.Host, &c.Port, &c.DBName, &c.Username, &c.SSLMode); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Host, &c.Port, &c.DBName, &c.Username, &c.SSLMode, &c.DBMS); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
