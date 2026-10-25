@@ -43,7 +43,6 @@ func NormalizeDBMS(value DBMS) (DBMS, error) {
 	return value, nil
 }
 
-// Target is immutable after connection; metadata remains in PostgreSQL.
 type Target struct {
 	DBMS     DBMS
 	Database string
@@ -75,7 +74,7 @@ func mariaConfig(p Params) (*mysql.Config, error) {
 	cfg.Net, cfg.Addr = "tcp", net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
 	cfg.User, cfg.Passwd, cfg.DBName = p.Username, p.Password, p.DBName
 	cfg.Timeout, cfg.ReadTimeout, cfg.WriteTimeout = 5*time.Second, 65*time.Second, 65*time.Second
-	cfg.MultiStatements = false // Statements are parsed and executed individually by the migration service.
+	cfg.MultiStatements = false
 	cfg.AllowNativePasswords = true
 	switch p.SSLMode {
 	case "", "disable":
@@ -87,8 +86,6 @@ func mariaConfig(p Params) (*mysql.Config, error) {
 	default:
 		return nil, errors.New("dbconn: MariaDB mendukung SSL disable, require, atau verify-full")
 	}
-	// Consistent quoting is essential to the migration scanner. Do not inherit a
-	// server mode with NO_BACKSLASH_ESCAPES or ANSI_QUOTES.
 	cfg.Params = map[string]string{"sql_mode": "'STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'", "default_storage_engine": "'InnoDB'"}
 	return cfg, nil
 }

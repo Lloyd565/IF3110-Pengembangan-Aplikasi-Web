@@ -10,7 +10,6 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-// FreshMaria uses a dedicated test instance; only the it_* schema is recreated.
 func FreshMaria(t testing.TB, name string) (*sql.DB, string) {
 	t.Helper()
 	dsn := os.Getenv("TEST_MARIADB_DSN")

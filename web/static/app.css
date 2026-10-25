@@ -112,9 +112,6 @@ button.link { background: none; border: 0; padding: 0; color: var(--primary); te
 .badge-success { background: var(--success); }
 .badge-failed { background: var(--danger); }
 
-.status-failed { border-left: 4px solid var(--danger); }
-.status-success { border-left: 4px solid var(--success); }
-
 pre.sql, pre.error-message {
   margin: 0;
   padding: 12px;

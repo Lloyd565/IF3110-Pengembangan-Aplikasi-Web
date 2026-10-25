@@ -25,8 +25,6 @@ type mariaStatement struct {
 	Tokens      []mariaToken
 }
 
-// splitMaria understands MariaDB quoting and comments. Executable comments are
-// rejected instead of stripping them and accidentally approving hidden commands.
 func splitMaria(source string) ([]mariaStatement, error) {
 	var out []mariaStatement
 	var normal strings.Builder
@@ -35,7 +33,6 @@ func splitMaria(source string) ([]mariaStatement, error) {
 	flushWord := func() {
 		if word.Len() > 0 {
 			value := word.String()
-			// MariaDB identifiers may start with a digit (e.g. 1db) but cannot be all digits.
 			allDigits := strings.Trim(value, "0123456789") == ""
 			tokens = append(tokens, mariaToken{text: value, word: !allDigits})
 			word.Reset()
@@ -133,9 +130,6 @@ func splitMaria(source string) ([]mariaStatement, error) {
 	return out, nil
 }
 
-// Validate object namespaces even when a registered target user has broad
-// server privileges. Column aliases remain legal; table references may only
-// name the configured database, including comma joins and nested SELECTs.
 func mariaScope(stmts []mariaStatement, database string) error {
 	type state struct{ query, from, relation bool }
 	for _, st := range stmts {
@@ -246,8 +240,6 @@ func checkMariaDatabase(source, database string) error {
 
 var mariaEngine = regexp.MustCompile(`\bengine\s*(=\s*)?([a-z0-9_]+)`)
 
-// Without "=", "engine x" may just be a column named engine, so only known
-// non-InnoDB engine names are rejected there.
 var nonInnoDBEngines = map[string]bool{
 	"myisam": true, "aria": true, "memory": true, "heap": true, "csv": true, "archive": true,
 	"blackhole": true, "federated": true, "federatedx": true, "connect": true, "mroonga": true,
