@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -395,52 +394,8 @@ func runMaria(ctx context.Context, target *dbconn.Target, source string) error {
 }
 
 func ExplainTarget(ctx context.Context, target *dbconn.Target, source string, analyze bool) (*Plan, error) {
-	if target.DBMS == dbconn.PostgreSQL {
-		return Explain(ctx, target.Postgres, source, analyze)
+	if target.DBMS != dbconn.PostgreSQL {
+		return nil, ValidationError("Execution plan hanya tersedia untuk PostgreSQL.")
 	}
-	stmts, ddl, err := mariaSQL(source)
-	if err != nil {
-		return nil, err
-	}
-	if err := mariaScope(stmts, target.Database); err != nil {
-		return nil, err
-	}
-	if ddl {
-		return nil, ValidationError("MariaDB: DDL tidak dapat dianalisis dalam transaksi rollback karena implicit commit. Analisis hanya tersedia untuk DML.")
-	}
-	plan := &Plan{Analyze: analyze}
-	err = withMaria(ctx, target, func(ctx context.Context, conn *sql.Conn) error {
-		if err := requireInnoDB(ctx, conn, target.Database); err != nil {
-			return err
-		}
-		tx, err := conn.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		for i, st := range stmts {
-			prefix := "EXPLAIN FORMAT=JSON "
-			if analyze {
-				prefix = "ANALYZE FORMAT=JSON "
-			}
-			var raw string
-			if err := tx.QueryRowContext(ctx, prefix+st.SQL).Scan(&raw); err != nil {
-				return ValidationError(fmt.Sprintf("Statement #%d: %s", i+1, err))
-			}
-			var value any
-			if err := json.Unmarshal([]byte(raw), &value); err != nil {
-				return err
-			}
-			formatted, err := json.MarshalIndent(value, "", "  ")
-			if err != nil {
-				return err
-			}
-			plan.Statements = append(plan.Statements, StatementPlan{N: i + 1, SQL: st.SQL, Explained: true, RawJSON: string(formatted)})
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return plan, nil
+	return Explain(ctx, target.Postgres, source, analyze)
 }

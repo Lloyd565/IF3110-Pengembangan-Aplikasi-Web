@@ -40,7 +40,7 @@
   <pre class="sql">{{$m.SQL}}</pre>
 </section>
 
-{{if and $m.IsDraft .Data.CanExecute}}
+{{if and $m.IsDraft .Data.CanExecute (ne $m.DBMS "mariadb")}}
 <section class="card" id="plan">
   <h2>Execution plan</h2>
   <form method="post" action="/db/{{$id}}/migrations/{{$m.ID}}/explain#plan" class="plan-form">
@@ -55,8 +55,6 @@
   <pre class="sql">{{$st.SQL}}</pre>
   {{if not $st.Explained}}
     <p class="muted">Bukan query DML.</p>
-  {{else if $st.RawJSON}}
-    <pre class="sql">{{$st.RawJSON}}</pre>
   {{else}}
   <div class="plan-scroll">
   <table class="plan">
