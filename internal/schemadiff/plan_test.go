@@ -74,6 +74,47 @@ func TestCompare(t *testing.T) {
 	})
 }
 
+func TestForeignKeyScope(t *testing.T) {
+	id := Column{Name: "id", Type: "integer"}
+	parent := Table{Name: "parent", Columns: []Column{id}, Constraints: []Constraint{{Name: "parent_pkey", Kind: "PRIMARY KEY", Columns: []string{"id"}}}}
+	child := Table{Name: "child", Columns: []Column{id, {Name: "pid", Type: "integer", Nullable: true}},
+		Constraints: []Constraint{{Name: "child_fk", Kind: "FOREIGN KEY", Columns: []string{"pid"}, RefTable: "parent", RefColumns: []string{"id"}}}}
+	other := Table{Name: "other", Columns: []Column{id}}
+	withNote := other
+	withNote.Columns = []Column{id, {Name: "note", Type: "text", Nullable: true}}
+	for _, kind := range []dbconn.DBMS{dbconn.PostgreSQL, dbconn.MariaDB} {
+		current := Snapshot{DBMS: kind, Schema: "app", Tables: []Table{child, other, parent}}
+		t.Run(string(kind)+" unrelated change keeps foreign keys", func(t *testing.T) {
+			desired := Snapshot{DBMS: kind, Schema: "ref", Tables: []Table{child, withNote, parent}}
+			p, _ := Compare(current, desired)
+			if len(p.Steps) != 1 || strings.Contains(p.SQL(), "child_fk") || strings.Contains(p.SQL(), "MODIFY") {
+				t.Fatal("only the added column expected:\n", p.SQL())
+			}
+		})
+		t.Run(string(kind)+" unrelated key on referenced table keeps foreign key", func(t *testing.T) {
+			keyed := parent
+			keyed.Columns = []Column{id, {Name: "code", Type: "text", Nullable: true}}
+			keyed.Constraints = append([]Constraint{{Name: "parent_code_key", Kind: "UNIQUE", Columns: []string{"code"}}}, parent.Constraints...)
+			desired := Snapshot{DBMS: kind, Schema: "ref", Tables: []Table{child, other, keyed}}
+			p, _ := Compare(current, desired)
+			if strings.Contains(p.SQL(), "child_fk") {
+				t.Fatal("unique key on another column must not touch the foreign key:\n", p.SQL())
+			}
+		})
+		t.Run(string(kind)+" referenced column change recreates foreign key", func(t *testing.T) {
+			bigParent := parent
+			bigParent.Columns = []Column{{Name: "id", Type: "bigint"}}
+			desired := Snapshot{DBMS: kind, Schema: "ref", Tables: []Table{child, other, bigParent}}
+			p, _ := Compare(current, desired)
+			sql := p.SQL()
+			drop, add := strings.Index(sql, "child_fk"), strings.LastIndex(sql, "child_fk")
+			if drop < 0 || drop == add || !strings.Contains(sql[add-40:], "ADD CONSTRAINT") {
+				t.Fatal("foreign key must be dropped before and re-added after the change:\n", sql)
+			}
+		})
+	}
+}
+
 func FuzzQuote(f *testing.F) {
 	for _, s := range []string{"normal", `a"b`, "a`b", "a;DROP TABLE x;--", ""} {
 		f.Add(s)

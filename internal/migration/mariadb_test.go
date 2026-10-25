@@ -18,6 +18,7 @@ func TestMariaSQLValidation(t *testing.T) {
 		"# comment\n INSERT INTO `semi;colon` VALUES (1); -- comment\n DELETE FROM t WHERE id=2",
 		"CREATE VIEW v AS SELECT id FROM t",
 		"CREATE TABLE t (engine VARCHAR(20)) ENGINE=InnoDB", "ALTER TABLE t ADD COLUMN engine INT",
+		"CREATE TABLE codes (c VARCHAR(5), CONSTRAINT c_chk CHECK (c LIKE 'A%'))",
 	} {
 		if _, _, err := mariaSQL(q); err != nil {
 			t.Fatalf("valid SQL rejected %q: %v", q, err)
@@ -31,6 +32,7 @@ func TestMariaSQLValidation(t *testing.T) {
 		"/*!40101 SET autocommit=1 */ SELECT 1", "/*M!100100 SET autocommit=1 */", "SELECT 1 INTO OUTFILE 'file'",
 		"INSERT INTO t VALUES('unterminated)", "/* unterminated", "DROP DATABASE target",
 		"CREATE TABLE t(id INT) ENGINE MyISAM", "ALTER TABLE t ENGINE = `Aria`",
+		"CREATE TABLE t LIKE other", "CREATE TABLE IF NOT EXISTS `target`.`t` LIKE other", "CREATE TABLE t (LIKE other)",
 	} {
 		if _, _, err := mariaSQL(q); err == nil {
 			t.Fatalf("unsafe SQL accepted %q", q)
