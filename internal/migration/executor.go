@@ -27,7 +27,21 @@ const interruptedMessage = "Server berhenti saat migration berjalan. Periksa Tar
 var dollarTag = regexp.MustCompile(`^\$([A-Za-z_][A-Za-z_0-9]*)?\$`)
 
 func statements(sql string) []string {
+	_, norm := split(sql)
+	return norm
+}
+
+func split(sql string) (raw, norm []string) {
 	var b strings.Builder
+	start := 0
+	emit := func(end int) {
+		if st := strings.Join(strings.Fields(strings.ToLower(b.String())), " "); st != "" {
+			raw = append(raw, strings.TrimSpace(sql[start:end]))
+			norm = append(norm, st)
+		}
+		b.Reset()
+		start = end + 1
+	}
 	for i := 0; i < len(sql); {
 		rest := sql[i:]
 		switch {
@@ -66,19 +80,16 @@ func statements(sql string) []string {
 				i = len(sql)
 			}
 			b.WriteString(" x ")
+		case rest[0] == ';':
+			emit(i)
+			i++
 		default:
 			b.WriteByte(rest[0])
 			i++
 		}
 	}
-
-	var out []string
-	for st := range strings.SplitSeq(b.String(), ";") {
-		if st = strings.Join(strings.Fields(strings.ToLower(st)), " "); st != "" {
-			out = append(out, st)
-		}
-	}
-	return out
+	emit(len(sql))
+	return raw, norm
 }
 
 var (

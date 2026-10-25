@@ -39,6 +39,51 @@
   <pre class="sql">{{$m.SQL}}</pre>
 </section>
 
+{{if and $m.IsDraft .Data.CanExecute}}
+<section class="card" id="plan">
+  <h2>Execution plan</h2>
+  <p class="muted">Menjalankan EXPLAIN untuk tiap statement di database target dalam transaksi yang selalu di-rollback, jadi data dan skema tidak berubah. Dengan ANALYZE, query benar-benar dijalankan untuk mengukur waktu dan jumlah row aktual.</p>
+  <form method="post" action="/db/{{$id}}/migrations/{{$m.ID}}/explain#plan" class="plan-form">
+    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+    <label><input type="checkbox" name="analyze" value="1" {{with .Data.Plan}}{{if .Analyze}}checked{{end}}{{end}}> EXPLAIN ANALYZE</label>
+    <button type="submit" class="secondary">Analisis plan</button>
+  </form>
+  {{with .Data.PlanError}}<pre class="error-message">{{.}}</pre>{{end}}
+  {{with .Data.Plan}}{{$analyze := .Analyze}}
+  {{range $st := .Statements}}
+  <h3>Statement #{{$st.N}}</h3>
+  <pre class="sql">{{$st.SQL}}</pre>
+  {{if not $st.Explained}}
+    <p class="muted">Bukan query DML, jadi tidak punya execution plan. Statement tetap dijalankan agar statement berikutnya melihat perubahan skema.</p>
+  {{else}}
+  <div class="plan-scroll">
+  <table class="plan">
+    <thead><tr>
+      <th>Node</th><th>Tabel / index</th><th>Kondisi</th>
+      <th>Est. cost</th><th>Est. rows</th>
+      {{if $analyze}}<th>Actual rows</th><th>Loops</th><th>Actual time (ms)</th>{{end}}
+    </tr></thead>
+    <tbody>
+    {{range $n := $st.Nodes}}
+    <tr>
+      <td class="plan-node" style="--depth: {{.Depth}}">{{if .Depth}}→ {{end}}<strong>{{.NodeType}}</strong>{{with .JoinType}} <span class="muted">({{.}})</span>{{end}}{{with .Strategy}} <span class="muted">[{{.}}]</span>{{end}}</td>
+      <td>{{with .Relation}}<div><code>{{.}}</code>{{if ne $n.Alias .}} <span class="muted">as {{$n.Alias}}</span>{{end}}</div>{{end}}{{with .Index}}<div>index <code>{{.}}</code></div>{{end}}</td>
+      <td>{{with .Cond}}<code>{{.}}</code><br>{{end}}{{with .HashCond}}<code>{{.}}</code><br>{{end}}{{with .JoinFilter}}<code>{{.}}</code><br>{{end}}{{with .Filter}}filter <code>{{.}}</code>{{end}}{{if .RowsRemoved}}<br><span class="muted">{{.RowsRemoved}} row dibuang filter</span>{{end}}</td>
+      <td>{{printf "%.2f..%.2f" .StartupCost .TotalCost}}</td>
+      <td>{{.PlanRows}}</td>
+      {{if $analyze}}<td>{{.ActualRows}}</td><td>{{.ActualLoops}}</td><td>{{printf "%.3f" .ActualTime}}</td>{{end}}
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  <p class="muted">Planning time: {{printf "%.3f" $st.PlanningTime}} ms{{if $analyze}} · Execution time: {{printf "%.3f" $st.ExecutionTime}} ms{{end}}</p>
+  {{end}}
+  {{end}}
+  {{end}}
+</section>
+{{end}}
+
 <section class="card">
   <h2>Pelaksana dan waktu</h2>
   <dl class="meta">

@@ -166,3 +166,7 @@ pre.error-message { color: var(--danger); }
   .connections li { flex-direction: column; align-items: flex-start; }
   .actions { flex-wrap: wrap; }
 }
+
+.plan-form { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+.plan-scroll { overflow-x: auto; margin: 8px 0; }
+.plan td.plan-node { padding-left: calc(10px + var(--depth) * 18px); white-space: nowrap; }
