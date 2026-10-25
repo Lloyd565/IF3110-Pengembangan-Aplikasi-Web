@@ -266,7 +266,7 @@ Jika `TEST_DATABASE_URL` atau `TEST_MARIADB_DSN` kosong, test yang membutuhkan i
 
 | Perintah | Fungsi |
 |---|---|
-| `make run` | Menjalankan server |
+| `make run` | Membuat `.env` jika belum ada (kunci acak + admin `admin`, password lihat `BOOTSTRAP_ADMIN_PASSWORD` di `.env`), menyalakan database, lalu menjalankan server |
 | `make db-up` | Menjalankan seluruh database Compose dan menunggu healthcheck |
 | `make build` | Memeriksa build seluruh package |
 | `make vet` | Menjalankan `go vet ./...` |
