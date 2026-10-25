@@ -91,29 +91,11 @@ Pada Bash, jalankan `openssl rand -base64 32` dua kali dan gunakan masing-masing
 
 Bootstrap membuat akun hanya jika belum ada Platform Admin dan username belum dipakai. Tidak ada akun login bawaan. Setelah akun berhasil dibuat, kosongkan kedua variabel `BOOTSTRAP_ADMIN_*` pada `.env` dan environment terminal sebelum startup berikutnya.
 
-### 3. Muat `.env` dan jalankan server
+### 3. Jalankan server
 
-Aplikasi Go membaca environment proses; file `.env` **tidak dimuat otomatis**. Untuk PowerShell, gunakan nilai `.env` tanpa pembungkus tanda kutip, kemudian jalankan:
-
-```powershell
-foreach ($line in Get-Content .env) {
-    if ([string]::IsNullOrWhiteSpace($line) -or $line.TrimStart().StartsWith('#')) {
-        continue
-    }
-    $pair = $line.Split('=', 2)
-    if ($pair.Length -eq 2) {
-        [Environment]::SetEnvironmentVariable($pair[0].Trim(), $pair[1], 'Process')
-    }
-}
-go run ./cmd/server
-```
-
-Untuk Bash, isi `.env` dengan sintaks assignment shell yang valid; kutip nilai yang mengandung spasi atau karakter khusus:
+Saat startup, server memuat `.env` dari direktori kerja secara otomatis. Variabel environment yang sudah di-set di terminal tidak ditimpa. Dengan `APP_ENV=production`, `.env` tidak dibaca dan semua variabel wajib di-set langsung di environment. Jalankan dari root repository:
 
 ```bash
-set -a
-source .env
-set +a
 go run ./cmd/server
 ```
 
