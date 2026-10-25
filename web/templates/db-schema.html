@@ -1,0 +1,29 @@
+{{define "title"}}Explorer Schema{{end}}
+{{define "content"}}
+{{$id := .Data.ConnID}}
+<nav class="crumbs"><a href="/dashboard">Dashboard</a> / Schema</nav>
+<div class="page-head">
+  <h1>Explorer Schema</h1>
+  <a class="button secondary" href="/db/{{$id}}/migrations">Riwayat migration</a>
+</div>
+{{range .Data.Schemas}}
+<section class="card">
+  {{$schema := .Name}}
+  <h2>{{.Name}}</h2>
+  {{if .Tables}}
+  <ul class="list">
+    {{range .Tables}}
+    <li>
+      <a href="/db/{{$id}}/tables/{{pathEscape $schema}}/{{pathEscape .Name}}">{{.Name}}</a>
+      <span class="muted">{{.Kind}}</span>
+    </li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p class="muted">Tidak ada tabel.</p>
+  {{end}}
+</section>
+{{else}}
+<p class="muted">Tidak ada schema yang bisa ditampilkan.</p>
+{{end}}
+{{end}}

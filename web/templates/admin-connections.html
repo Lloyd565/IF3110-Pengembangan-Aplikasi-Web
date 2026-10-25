@@ -1,0 +1,90 @@
+{{define "title"}}Admin Koneksi{{end}}
+{{define "content"}}
+<link rel="stylesheet" href="/static/admin.css">
+<nav class="crumbs admin-nav" aria-label="Menu admin">
+  <a href="/dashboard">Dashboard</a>
+  <a href="/admin/users">Pengguna</a>
+  <a href="/admin/groups">Group</a>
+  <a href="/admin/connections" aria-current="page">Koneksi</a>
+  <a href="/admin/grants">Hak akses</a>
+</nav>
+<div class="page-head"><h1>Admin Koneksi Database</h1></div>
+
+{{with .Data.Flash.Error}}<p class="alert" role="alert">{{.}}</p>{{end}}
+{{with .Data.Flash.OK}}<p class="ok" role="status">{{.}}</p>{{end}}
+
+<section class="card admin">
+  <h2>{{if .Data.Edit}}Ubah koneksi &ldquo;{{.Data.Edit.Name}}&rdquo;{{else}}Tambah koneksi{{end}}</h2>
+  <form method="post" action="/admin/connections" class="row-form">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    {{with .Data.Edit}}<input type="hidden" name="id" value="{{.ID}}">{{end}}
+    <label>DBMS
+      <select name="dbms">
+        <option value="postgresql"{{if ne .Data.Form.DBMS "mariadb"}} selected{{end}}>PostgreSQL</option>
+        <option value="mariadb"{{if eq .Data.Form.DBMS "mariadb"}} selected{{end}}>MariaDB (10.6.1+)</option>
+      </select>
+    </label>
+    <label>Nama koneksi
+      <input type="text" name="name" required maxlength="100" value="{{.Data.Form.Name}}">
+    </label>
+    <label>Host
+      <input type="text" name="host" required value="{{.Data.Form.Host}}">
+    </label>
+    <label>Port
+      <input type="number" name="port" required min="1" max="65535" value="{{.Data.Form.Port}}">
+    </label>
+    <label>Nama database
+      <input type="text" name="dbname" required value="{{.Data.Form.DBName}}">
+    </label>
+    <label>Username
+      <input type="text" name="username" required value="{{.Data.Form.Username}}" autocomplete="off">
+    </label>
+    <label>Password
+      <input type="password" name="password" {{if not .Data.Edit}}required{{end}} autocomplete="new-password">
+    </label>
+    <label>SSL mode
+      <select name="sslmode">
+        {{$mode := .Data.Form.SSLMode}}
+        {{range .Data.SSLModes}}<option value="{{.}}"{{if eq . $mode}} selected{{end}}>{{.}}</option>{{end}}
+      </select>
+    </label>
+    <button type="submit" name="action" value="{{if .Data.Edit}}update{{else}}create{{end}}">Simpan</button>
+    <button type="submit" name="action" value="test" class="secondary" formnovalidate>Test connection</button>
+    {{if .Data.Edit}}<a class="button secondary" href="/admin/connections">Batal</a>{{end}}
+  </form>
+  <p class="muted">Password disimpan terenkripsi dan tidak pernah ditampilkan lagi.{{if .Data.Edit}} Kosongkan kolom password untuk mempertahankan password lama. Isi password untuk menguji koneksi.{{end}}</p>
+  <p class="muted">MariaDB: gunakan port server MariaDB (default 3306), database yang sudah dibuat, dan SSL disable, require, atau verify-full. Jenis DBMS koneksi yang sudah tersimpan tidak dapat diubah.</p>
+</section>
+
+<section class="card admin">
+  <h2>Daftar koneksi</h2>
+  {{if .Data.Conns}}
+  <table>
+    <thead><tr><th>Nama</th><th>DBMS</th><th>Host</th><th>Database</th><th>Username</th><th>SSL</th><th>Aksi</th></tr></thead>
+    <tbody>
+    {{range .Data.Conns}}
+      <tr>
+        <td>{{.Name}}</td>
+        <td>{{.DBMS}}</td>
+        <td>{{.Host}}:{{.Port}}</td>
+        <td>{{.DBName}}</td>
+        <td>{{.Username}}</td>
+        <td>{{.SSLMode}}</td>
+        <td class="actions-cell">
+          <a href="/admin/connections?edit={{.ID}}">Ubah</a>
+          <form method="post" action="/admin/connections" class="inline">
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+            <input type="hidden" name="action" value="delete">
+            <input type="hidden" name="id" value="{{.ID}}">
+            <button type="submit" class="danger">Hapus</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="muted">Belum ada koneksi database.</p>
+  {{end}}
+</section>
+{{end}}

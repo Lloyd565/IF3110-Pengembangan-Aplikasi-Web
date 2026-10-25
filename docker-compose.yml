@@ -9,6 +9,81 @@ services:
       - "5433:5432"
     volumes:
       - platform-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform -d platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  target-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: target
+      POSTGRES_PASSWORD: target
+      POSTGRES_DB: target
+    ports:
+      - "5434:5432"
+    volumes:
+      - target-data:/var/lib/postgresql/data
+      - ./scripts/target-seed.sql:/docker-entrypoint-initdb.d/001-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U target -d target"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mariadb-target:
+    image: mariadb:12.2
+    environment:
+      MARIADB_ROOT_PASSWORD: local-root
+      MARIADB_DATABASE: target
+      MARIADB_USER: target
+      MARIADB_PASSWORD: target
+    ports:
+      - "3307:3306"
+    volumes:
+      - mariadb-data:/var/lib/mysql
+      - ./scripts/mariadb-seed.sql:/docker-entrypoint-initdb.d/001-seed.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mariadb-test:
+    image: mariadb:12.2
+    profiles: ["test"]
+    environment:
+      MARIADB_ROOT_PASSWORD: test
+      MARIADB_ROOT_HOST: "%"
+      MARIADB_DATABASE: test
+    ports:
+      - "3308:3306"
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  test-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: test
+    ports:
+      - "5435:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   platform-data:
+  target-data:
+  mariadb-data:

@@ -1,0 +1,15 @@
+{{define "title"}}Login{{end}}
+{{define "content"}}
+<section class="login-panel" aria-labelledby="login-title">
+  <div class="page-head"><h1 id="login-title">Login</h1></div>
+  <form method="post" action="/login" class="editor">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <label for="username">Username</label>
+    <input id="username" name="username" type="text" autocomplete="username" maxlength="200" value="{{.Data.Username}}" required autofocus>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" maxlength="1024" required>
+    <button type="submit">Masuk</button>
+  </form>
+  {{if .Data.Error}}<p class="alert" role="alert">{{.Data.Error}}</p>{{end}}
+</section>
+{{end}}

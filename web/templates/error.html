@@ -1,0 +1,9 @@
+{{define "title"}}{{.Data.Status}}{{end}}
+{{define "content"}}
+<section class="error-page">
+  <p class="error-code">{{.Data.Status}}</p>
+  <h1>{{.Data.Text}}</h1>
+  <p>{{.Data.Message}}</p>
+  <a class="button" href="/dashboard">Kembali ke dashboard</a>
+</section>
+{{end}}
