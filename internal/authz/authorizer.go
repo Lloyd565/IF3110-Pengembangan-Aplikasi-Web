@@ -51,10 +51,12 @@ func (a *Authorizer) Can(ctx context.Context, p reqctx.Principal, connID uuid.UU
 func (a *Authorizer) VisibleConnections(ctx context.Context, p reqctx.Principal) ([]ConnAccess, error) {
 	rows, err := a.DB.Query(ctx, `
 		SELECT c.id, c.name,
-		       CASE WHEN bool_or(g.level = 'edit') THEN 'edit' ELSE 'view' END
+		       CASE WHEN bool_or(g.level = 'edit') THEN 'edit' ELSE 'view' END,
+		       array_agg(DISTINCT gr.name ORDER BY gr.name)
 		FROM db_connections c
 		JOIN db_grants g       ON g.connection_id = c.id
 		JOIN group_members m   ON m.group_id = g.group_id
+		JOIN groups gr         ON gr.id = g.group_id
 		JOIN users u           ON u.id = m.user_id AND u.is_active
 		WHERE m.user_id = $1 AND c.deleted_at IS NULL
 		GROUP BY c.id, c.name
@@ -68,7 +70,7 @@ func (a *Authorizer) VisibleConnections(ctx context.Context, p reqctx.Principal)
 	for rows.Next() {
 		var ca ConnAccess
 		var lvl string
-		if err := rows.Scan(&ca.ConnectionID, &ca.Name, &lvl); err != nil {
+		if err := rows.Scan(&ca.ConnectionID, &ca.Name, &lvl, &ca.Groups); err != nil {
 			return nil, err
 		}
 		ca.Level = Level(lvl)

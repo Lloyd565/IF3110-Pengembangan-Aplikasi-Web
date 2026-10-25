@@ -2,6 +2,7 @@ package schemadiff
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -93,11 +94,10 @@ func Compare(current, desired Snapshot) (Plan, error) {
 			p.manual(name, "foreign key dari schema lain; dependensi luar cakupan tidak dihapus otomatis")
 		}
 	}
-	// Foreign keys are temporarily removed before changing columns, keys or
-	// tables; all desired references are recreated only after dependencies exist.
+	affected := affectedForeignKeys(kind, old, next)
 	for _, t := range current.Tables {
 		for _, c := range t.Constraints {
-			if c.Kind == "FOREIGN KEY" {
+			if c.Kind == "FOREIGN KEY" && affected[t.Name+"."+c.Name] {
 				p.step("Lepas foreign key "+t.Name+"."+c.Name, "ALTER TABLE "+qualified(kind, current.Schema, t.Name)+" "+dropConstraint(kind, c))
 			}
 		}
@@ -209,8 +209,9 @@ func Compare(current, desired Snapshot) (Plan, error) {
 		}
 	}
 	for _, t := range desired.Tables {
+		existing := constraintMap(old[t.Name].Constraints)
 		for _, c := range t.Constraints {
-			if c.Kind == "FOREIGN KEY" {
+			if prev, ok := existing[c.Name]; c.Kind == "FOREIGN KEY" && (affected[t.Name+"."+c.Name] || !ok || !same(prev, c)) {
 				p.step("Pasang foreign key "+t.Name+"."+c.Name, "ALTER TABLE "+qualified(kind, current.Schema, t.Name)+" ADD "+constraintSQL(kind, current.Schema, c))
 			}
 		}
@@ -308,7 +309,7 @@ func alterMaria(p *Plan, schema string, a, b Table) {
 			actions = append(actions, "DROP COLUMN "+quote(kind, c.Name))
 		}
 	}
-	orderChanged := !same(columnNames(a.Columns), columnNames(b.Columns))
+	orderChanged := relativeOrderChanged(a, b)
 	for i, c := range b.Columns {
 		old, had := ac[c.Name]
 		if !had || !same(old, c) || orderChanged {
@@ -345,6 +346,82 @@ func alterMaria(p *Plan, schema string, a, b Table) {
 	if len(actions) > 0 {
 		p.step("Ubah tabel "+a.Name, "ALTER TABLE "+qualified(kind, schema, a.Name)+"\n  "+strings.Join(actions, ",\n  "))
 	}
+}
+
+func affectedForeignKeys(kind dbconn.DBMS, old, next map[string]Table) map[string]bool {
+	columnChanged := func(table, column string) bool {
+		a, had := old[table]
+		b, want := next[table]
+		if !had || !want || (kind == dbconn.MariaDB && relativeOrderChanged(a, b)) {
+			return true
+		}
+		x, had := columnMap(a.Columns)[column]
+		y, want := columnMap(b.Columns)[column]
+		return !had || !want || !same(x, y)
+	}
+	keysChanged := func(table string, columns []string) bool {
+		a, b := old[table], next[table]
+		ac, bc := constraintMap(a.Constraints), constraintMap(b.Constraints)
+		for _, name := range diffConstraints(a, b) {
+			for _, c := range []Constraint{ac[name], bc[name]} {
+				if c.Kind == "PRIMARY KEY" || c.Kind == "UNIQUE" {
+					for _, col := range c.Columns {
+						if slices.Contains(columns, col) {
+							return true
+						}
+					}
+				}
+			}
+		}
+		ai, bi := indexMap(a.Indexes), indexMap(b.Indexes)
+		for _, name := range diffIndexes(a, b) {
+			for _, ix := range []Index{ai[name], bi[name]} {
+				for _, key := range ix.Keys {
+					if slices.Contains(columns, key.Name) {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+	out := map[string]bool{}
+	for _, t := range old {
+		desired := constraintMap(next[t.Name].Constraints)
+		for _, c := range t.Constraints {
+			if c.Kind != "FOREIGN KEY" {
+				continue
+			}
+			v, ok := desired[c.Name]
+			hit := !ok || !same(c, v) || keysChanged(c.RefTable, c.RefColumns) || (kind == dbconn.MariaDB && keysChanged(t.Name, c.Columns))
+			for _, col := range c.Columns {
+				hit = hit || columnChanged(t.Name, col)
+			}
+			for _, col := range c.RefColumns {
+				hit = hit || columnChanged(c.RefTable, col)
+			}
+			if hit {
+				out[t.Name+"."+c.Name] = true
+			}
+		}
+	}
+	return out
+}
+
+func relativeOrderChanged(a, b Table) bool {
+	ac, bc := columnMap(a.Columns), columnMap(b.Columns)
+	var x, y []string
+	for _, c := range a.Columns {
+		if _, ok := bc[c.Name]; ok {
+			x = append(x, c.Name)
+		}
+	}
+	for _, c := range b.Columns {
+		if _, ok := ac[c.Name]; ok {
+			y = append(y, c.Name)
+		}
+	}
+	return !same(x, y)
 }
 
 func columnSQL(kind dbconn.DBMS, c Column) string {
