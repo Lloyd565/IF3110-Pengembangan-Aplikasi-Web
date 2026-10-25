@@ -80,6 +80,9 @@ func (s *Server) Routes() http.Handler {
 	admin("/admin/grants", s.adminGrants)
 
 	protected("GET /db/{id}/schema", s.dbSchema)
+	protected("GET /db/{id}/schema/diff", s.schemaDiffForm)
+	protected("POST /db/{id}/schema/diff", s.schemaDiffPreview)
+	protected("POST /db/{id}/schema/diff/draft", s.schemaDiffDraft)
 	protected("GET /db/{id}/tables/{schema}/{table}", s.dbTable)
 	protected("GET /db/{id}/data/{schema}/{table}", s.dbData)
 	protected("GET /db/{id}/migrations", s.migrationList)
