@@ -35,8 +35,9 @@ func splitMaria(source string) ([]mariaStatement, error) {
 	flushWord := func() {
 		if word.Len() > 0 {
 			value := word.String()
-			first := value[0]
-			tokens = append(tokens, mariaToken{text: value, word: (first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_' || first == '$' || first >= 128})
+			// MariaDB identifiers may start with a digit (e.g. 1db) but cannot be all digits.
+			allDigits := strings.Trim(value, "0123456789") == ""
+			tokens = append(tokens, mariaToken{text: value, word: !allDigits})
 			word.Reset()
 		}
 	}
@@ -181,7 +182,7 @@ func mariaScope(stmts []mariaStatement, database string) error {
 					current.relation = true
 				}
 				continue
-			case "join":
+			case "join", "straight_join":
 				if current.query || hasPrefixWord(st.Normal, "update") {
 					current.relation = true
 				}
@@ -243,7 +244,16 @@ func checkMariaDatabase(source, database string) error {
 	return mariaScope(stmts, database)
 }
 
-var mariaEngine = regexp.MustCompile(`\bengine\s*(?:=\s*)?([a-z0-9_]+)`)
+var mariaEngine = regexp.MustCompile(`\bengine\s*(=\s*)?([a-z0-9_]+)`)
+
+// Without "=", "engine x" may just be a column named engine, so only known
+// non-InnoDB engine names are rejected there.
+var nonInnoDBEngines = map[string]bool{
+	"myisam": true, "aria": true, "memory": true, "heap": true, "csv": true, "archive": true,
+	"blackhole": true, "federated": true, "federatedx": true, "connect": true, "mroonga": true,
+	"rocksdb": true, "spider": true, "s3": true, "sequence": true, "merge": true, "mrg_myisam": true,
+	"columnstore": true, "oqgraph": true, "sphinx": true,
+}
 
 func mariaSQL(source string) ([]mariaStatement, bool, error) {
 	stmts, err := splitMaria(source)
@@ -269,7 +279,7 @@ func mariaSQL(source string) ([]mariaStatement, bool, error) {
 				return nil, false, ValidationError("MariaDB: CREATE TABLE AS SELECT/LIKE tidak didukung; pisahkan schema dan data.")
 			}
 			for _, engine := range mariaEngine.FindAllStringSubmatch(n, -1) {
-				if engine[1] != "innodb" {
+				if (engine[1] != "" && engine[2] != "innodb") || nonInnoDBEngines[engine[2]] {
 					return nil, false, ValidationError("MariaDB: hanya engine InnoDB yang didukung.")
 				}
 			}

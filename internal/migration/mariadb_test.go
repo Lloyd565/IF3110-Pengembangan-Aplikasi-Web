@@ -17,6 +17,7 @@ func TestMariaSQLValidation(t *testing.T) {
 		"INSERT INTO t VALUES ('semi;colon'); UPDATE t SET title='it\\'s ok' WHERE id=1",
 		"# comment\n INSERT INTO `semi;colon` VALUES (1); -- comment\n DELETE FROM t WHERE id=2",
 		"CREATE VIEW v AS SELECT id FROM t",
+		"CREATE TABLE t (engine VARCHAR(20)) ENGINE=InnoDB", "ALTER TABLE t ADD COLUMN engine INT",
 	} {
 		if _, _, err := mariaSQL(q); err != nil {
 			t.Fatalf("valid SQL rejected %q: %v", q, err)
@@ -29,6 +30,7 @@ func TestMariaSQLValidation(t *testing.T) {
 		"BEGIN;INSERT INTO t VALUES(1);COMMIT", "SET autocommit=1", "CALL something()", "USE otherdb",
 		"/*!40101 SET autocommit=1 */ SELECT 1", "/*M!100100 SET autocommit=1 */", "SELECT 1 INTO OUTFILE 'file'",
 		"INSERT INTO t VALUES('unterminated)", "/* unterminated", "DROP DATABASE target",
+		"CREATE TABLE t(id INT) ENGINE MyISAM", "ALTER TABLE t ENGINE = `Aria`",
 	} {
 		if _, _, err := mariaSQL(q); err == nil {
 			t.Fatalf("unsafe SQL accepted %q", q)
@@ -53,6 +55,7 @@ func TestMariaDatabaseScope(t *testing.T) {
 		"SELECT * FROM (SELECT * FROM other.t) x", "INSERT INTO other.t VALUES(1)", "UPDATE other.t SET x=1",
 		"ALTER TABLE other.t ADD x INT", "CREATE INDEX ix ON other.t(x)", "RENAME TABLE target.t TO other.t",
 		"CREATE TABLE target.child(id INT, FOREIGN KEY(id) REFERENCES other.parent(id))", "SELECT other.fun()", "SELECT other.t.x FROM target.t",
+		"SELECT * FROM target.t STRAIGHT_JOIN mysql.user", "SELECT * FROM 1db.t", "SELECT * FROM t JOIN `1db`.t2 ON 1=1",
 	} {
 		if err := checkMariaDatabase(q, "target"); err == nil {
 			t.Fatalf("cross-database SQL accepted %q", q)
