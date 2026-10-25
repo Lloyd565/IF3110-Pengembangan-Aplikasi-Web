@@ -37,9 +37,28 @@ Alur utama: **Login → Pilih database → Lihat schema/data → Buat draft migr
 - Explorer schema, tabel, kolom, constraint, index, dan data dengan pagination 50 baris per halaman.
 - Pembuatan dan pengubahan draft migration, eksekusi SQL dalam transaksi, serta riwayat hasil eksekusi.
 - Schema diff terhadap schema referensi dan pembuatan draft SQL migration yang dapat ditinjau serta diedit sebelum eksekusi.
+- Analisis execution plan (`EXPLAIN` / `EXPLAIN ANALYZE`) untuk draft migration PostgreSQL sebelum eksekusi.
 - Unit test, integration test dengan PostgreSQL, dan blackbox HTTP/HTTPS.
 
 ## Menjalankan Aplikasi
+
+### Cara cepat: `make run`
+
+Siapkan Go 1.25.4 atau lebih baru, Docker dengan Docker Compose v2, Git, dan `make`. Dari root repository, jalankan:
+
+```bash
+make run
+```
+
+Perintah ini:
+
+1. Membuat `.env` dari `.env.example` jika belum ada, lalu mengisi `SESSION_KEY` dan `ENCRYPTION_KEY` dengan key acak. File `.env` yang sudah ada tidak diubah.
+2. Menyalakan seluruh database Compose dan menunggu healthcheck.
+3. Menjalankan server di **http://localhost:8080**.
+
+Login memakai akun admin dari `BOOTSTRAP_ADMIN_USERNAME` dan `BOOTSTRAP_ADMIN_PASSWORD` di `.env` (bawaan `.env.example`: `admin` / `12345678`). Lanjutkan ke [Alur Penggunaan](#alur-penggunaan).
+
+Tanpa `make`, ikuti langkah manual di bawah.
 
 ### 1. Prasyarat
 
@@ -176,14 +195,16 @@ Aturan migration MariaDB:
 
 - Satu migration schema berisi **tepat satu statement DDL** tabel/index/view. Contoh: `ALTER TABLE flights ADD COLUMN gate VARCHAR(10);`.
 - DDL MariaDB melakukan implicit commit. Batch beberapa DDL atau campuran DDL-DML ditolak saat menyimpan dan sebelum eksekusi; aplikasi tidak menjanjikan rollback transaksi untuk DDL.
-- Batch `INSERT`, `UPDATE`, `DELETE`, `REPLACE`, dan `SELECT` dijalankan dalam transaksi. Database yang mengandung tabel non-InnoDB ditolak untuk batch DML dan analisis plan.
+- Batch `INSERT`, `UPDATE`, `DELETE`, `REPLACE`, dan `SELECT` dijalankan dalam transaksi. Database yang mengandung tabel non-InnoDB ditolak untuk batch DML.
 - Kontrol transaksi, perintah administrasi, executable comments, `CREATE OR REPLACE TABLE`, `CREATE TABLE AS SELECT/LIKE`, DDL partisi, serta DROP/RENAME beberapa objek tidak didukung. Referensi ke database lain ditolak.
-- Execution plan DML ditampilkan sebagai JSON native dari `EXPLAIN FORMAT=JSON` atau `ANALYZE FORMAT=JSON`. Analisis selalu di-rollback. DDL tidak dianalisis karena dapat melakukan implicit commit.
+- Analisis execution plan tidak tersedia untuk MariaDB; fitur ini hanya untuk PostgreSQL.
 - Riwayat dan penomoran versi tetap dicatat pada Platform DB. Jika server/koneksi terputus saat eksekusi, periksa kondisi Target DB sebelum membuat migration perbaikan.
 
 Perbedaan transaksi ini mengikuti [implicit commit MariaDB](https://mariadb.com/docs/server/reference/sql-statements/transactions/sql-statements-that-cause-an-implicit-commit) dan [atomic DDL MariaDB](https://mariadb.com/docs/server/reference/sql-statements/data-definition/atomic-ddl).
 
-## Aturan Akses dan Session
+### Query execution plan analysis (bonus)
+
+Pada detail draft migration PostgreSQL, pengguna dengan hak Edit dapat menekan **Analisis plan**. Opsi **EXPLAIN ANALYZE** menjalankan query untuk mendapatkan waktu dan jumlah row aktual. Tabel plan menampilkan jenis node/scan, tabel dan index, kondisi join/filter, join strategy, estimated cost, estimated rows, serta actual rows, loops, dan waktu untuk ANALYZE. Seluruh SQL dijalankan dalam transaksi yang selalu di-rollback, sehingga Target DB tidak berubah. Statement non-DML (misalnya DDL) dijalankan di transaksi yang sama agar statement berikutnya dapat dianalisis, tetapi tidak ditampilkan plan-nya.
 
 ### Schema diff dan migration generation (bonus)
 
@@ -202,6 +223,8 @@ Objek/atribut khusus seperti view, partition/inheritance, trigger, kolom generat
 Tidak ada `DROP CASCADE` otomatis. Konversi tipe, NOT NULL, dan constraint baru tetap dapat gagal jika data aktif tidak memenuhi syarat; tinjau data dan sesuaikan SQL pada editor. Batas satu perbandingan adalah 200 tabel, 2000 kolom, dan 250 statement.
 
 Endpoint fitur: `GET/POST /db/{id}/schema/diff` untuk form/preview dan `POST /db/{id}/schema/diff/draft` untuk penyimpanan. POST tetap memerlukan CSRF; View Only dapat membandingkan tetapi tidak menyimpan draft.
+
+## Aturan Akses dan Session
 
 ### Hak akses database
 
@@ -259,14 +282,14 @@ Jika `TEST_DATABASE_URL` atau `TEST_MARIADB_DSN` kosong, test yang membutuhkan i
 | Admin dan otorisasi | Bootstrap admin, pengguna, group/anggota, grant efektif, matriks akses, serta akses yang ditolak |
 | Koneksi | Enkripsi/dekripsi, validasi key, registry, dan test connection |
 | Explorer dan migration | Schema/data, pagination, validasi SQL, eksekusi sukses/gagal, rollback, versi, dan riwayat |
-| Multi-DBMS | Upgrade metadata lama, driver/cache, scope database, explorer MariaDB, DDL/DML, rollback InnoDB, plan native, dan blackbox HTTPS untuk kedua DBMS |
+| Multi-DBMS | Upgrade metadata lama, driver/cache, scope database, explorer MariaDB, DDL/DML, rollback InnoDB, dan blackbox HTTPS untuk kedua DBMS |
 | Schema diff | Diff deterministik, quote identifier, urutan dependensi, round-trip DDL pada kedua DBMS, preservasi data, metadata khusus, drift fingerprint, CSRF/hak akses, draft yang dapat diedit, serta atomic batch save |
 
 ## Perintah Makefile
 
 | Perintah | Fungsi |
 |---|---|
-| `make run` | Membuat `.env` jika belum ada (kunci acak + admin `admin`, password lihat `BOOTSTRAP_ADMIN_PASSWORD` di `.env`), menyalakan database, lalu menjalankan server |
+| `make run` | Membuat `.env` jika belum ada (key acak; akun admin sesuai `BOOTSTRAP_ADMIN_*` di `.env`), menyalakan database, lalu menjalankan server |
 | `make db-up` | Menjalankan seluruh database Compose dan menunggu healthcheck |
 | `make build` | Memeriksa build seluruh package |
 | `make vet` | Menjalankan `go vet ./...` |
@@ -280,6 +303,7 @@ Jika `TEST_DATABASE_URL` atau `TEST_MARIADB_DSN` kosong, test yang membutuhkan i
 ```text
 cmd/
   server/          Entry point, wiring, startup, dan graceful shutdown
+  envinit/         Membuat .env dengan key acak (dipakai make run)
   hash-password/   Utilitas Argon2id; membaca password dari stdin
 internal/
   admin/           Operasi admin dan bootstrap akun pertama
