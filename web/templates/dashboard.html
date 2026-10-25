@@ -14,7 +14,7 @@
   {{if .Data.Connections}}
   <ul class="list connections">
     {{range .Data.Connections}}<li>
-      <div><strong>{{.Name}}</strong><br><span class="muted">{{if eq .Level "edit"}}View + Edit{{else}}View Only{{end}}</span></div>
+      <div><strong>{{.Name}}</strong><br><span class="muted">{{if eq .Level "edit"}}View + Edit{{else}}View Only{{end}}{{with .Groups}} &middot; lewat group: {{range $i, $g := .}}{{if $i}}, {{end}}{{$g}}{{end}}{{end}}</span></div>
       <div class="actions">
         <a class="button" href="/db/{{.ConnectionID}}/schema">Buka explorer</a>
         <a class="button secondary" href="/db/{{.ConnectionID}}/migrations">Riwayat migration</a>
