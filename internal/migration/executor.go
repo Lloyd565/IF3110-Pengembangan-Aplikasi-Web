@@ -123,6 +123,12 @@ func CheckTransactional(sql string) error {
 }
 
 func Execute(ctx context.Context, platform, target *pgxpool.Pool, connID uuid.UUID, id, userID int64) error {
+	return execute(ctx, platform, connID, id, userID, CheckTransactional, target.Ping,
+		func(ctx context.Context, sql string) error { return runOnTarget(ctx, target, sql) })
+}
+
+func execute(ctx context.Context, platform *pgxpool.Pool, connID uuid.UUID, id, userID int64,
+	validate func(string) error, ping func(context.Context) error, run func(context.Context, string) error) error {
 	m, err := Get(ctx, platform, connID, id)
 	if err != nil {
 		return err
@@ -130,22 +136,22 @@ func Execute(ctx context.Context, platform, target *pgxpool.Pool, connID uuid.UU
 	if !m.IsDraft() {
 		return ErrNotDraft
 	}
-	if err := CheckTransactional(m.SQL); err != nil {
+	if err := validate(m.SQL); err != nil {
 		return err
 	}
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	err = target.Ping(pingCtx)
+	err = ping(pingCtx)
 	cancel()
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrTargetUnavailable, err)
 	}
 
-	sql, err := markRunning(ctx, platform, connID, id, userID)
+	sql, err := markRunningChecked(ctx, platform, connID, id, userID, validate)
 	if err != nil {
 		return err
 	}
 
-	runErr := runOnTarget(ctx, target, sql)
+	runErr := run(ctx, sql)
 
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
@@ -160,6 +166,10 @@ func Execute(ctx context.Context, platform, target *pgxpool.Pool, connID uuid.UU
 }
 
 func markRunning(ctx context.Context, platform *pgxpool.Pool, connID uuid.UUID, id, userID int64) (string, error) {
+	return markRunningChecked(ctx, platform, connID, id, userID, CheckTransactional)
+}
+
+func markRunningChecked(ctx context.Context, platform *pgxpool.Pool, connID uuid.UUID, id, userID int64, validate func(string) error) (string, error) {
 	tx, err := platform.Begin(ctx)
 	if err != nil {
 		return "", err
@@ -180,7 +190,7 @@ func markRunning(ctx context.Context, platform *pgxpool.Pool, connID uuid.UUID, 
 	if status != StatusDraft {
 		return "", ErrNotDraft
 	}
-	if err := CheckTransactional(sql); err != nil {
+	if err := validate(sql); err != nil {
 		return "", err
 	}
 	var busy bool

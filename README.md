@@ -1,6 +1,6 @@
 # IF3110 - Database Management Platform
 
-Tugas Besar Milestone 1 mata kuliah IF3110 Pengembangan Aplikasi Web. Aplikasi ini mengatur akses pengguna ke database PostgreSQL, menyediakan explorer schema dan data, serta mencatat perubahan database melalui migration SQL.
+Tugas Besar Milestone 1 mata kuliah IF3110 Pengembangan Aplikasi Web. Aplikasi ini mengatur akses pengguna ke database PostgreSQL dan MariaDB, menyediakan explorer schema dan data, serta mencatat perubahan database melalui migration SQL. Metadata platform tetap disimpan di PostgreSQL.
 
 Alur utama: **Login → Pilih database → Lihat schema/data → Buat draft migration → Eksekusi → Commit/Rollback → Lihat riwayat**.
 
@@ -18,8 +18,9 @@ Alur utama: **Login → Pilih database → Lihat schema/data → Buat draft migr
 |---|---|
 | Backend | Go 1.25.4+, `net/http` |
 | Frontend | Go `html/template`, HTML, CSS |
-| Database platform dan target | PostgreSQL 16 |
-| Driver database | pgx v5 |
+| Database platform | PostgreSQL 16 |
+| Database target | PostgreSQL 16 dan MariaDB 10.6.1+ (Compose: 12.2) |
+| Driver database | pgx v5 dan go-sql-driver/mysql |
 | Password hashing | Argon2id |
 | Enkripsi password koneksi | AES-256-GCM |
 | Lingkungan database lokal | Docker Compose |
@@ -31,7 +32,7 @@ Alur utama: **Login → Pilih database → Lihat schema/data → Buat draft migr
 - Perlindungan CSRF, middleware autentikasi/admin, security headers, dan pembatasan percobaan login.
 - Pengelolaan pengguna: membuat akun, mengubah status aktif/admin, dan mereset password.
 - Pengelolaan group, keanggotaan, dan hak akses database melalui group.
-- Pengelolaan koneksi PostgreSQL: tambah, ubah, hapus, dan test connection. Password koneksi disimpan terenkripsi.
+- Pengelolaan koneksi PostgreSQL dan MariaDB: tambah, ubah, hapus, dan test connection. Password koneksi disimpan terenkripsi. Jenis DBMS dipilih saat membuat koneksi dan tidak dapat diubah pada koneksi yang sama.
 - Dashboard database sesuai hak akses pengguna.
 - Explorer schema, tabel, kolom, constraint, index, dan data dengan pagination 50 baris per halaman.
 - Pembuatan dan pengubahan draft migration, eksekusi SQL dalam transaksi, serta riwayat hasil eksekusi.
@@ -51,15 +52,17 @@ docker compose up -d --wait
 
 Pada Bash, gunakan `cp .env.example .env` untuk menyalin konfigurasi.
 
-Compose menyediakan tiga database berikut. Server Go dijalankan langsung di komputer host.
+Compose menyediakan database berikut. Server Go dijalankan langsung di komputer host.
 
 | Service | Port host | Database | User | Password lokal |
 |---|---|---|---|---|
 | `platform-db` | 5433 | `platform` | `platform` | `platform` |
 | `target-db` | 5434 | `target` | `target` | `target` |
 | `test-db` | 5435 | `test` | `test` | `test` |
+| `mariadb-target` | 3307 | `target` | `target` | `target` |
+| `mariadb-test` (profile `test`) | 3308 | `test` | `root` | `test` |
 
-Kredensial pada tabel merupakan konfigurasi development di [docker-compose.yml](docker-compose.yml). Platform DB menyimpan user, group, grant, session, koneksi, dan riwayat migration. Target DB berisi contoh data penerbangan pada schema `flight_ops` dan `maintenance`. Test DB menggunakan tmpfs sehingga datanya bersifat sementara.
+Kredensial pada tabel merupakan konfigurasi development di [docker-compose.yml](docker-compose.yml). Platform DB menyimpan user, group, grant, session, koneksi, dan riwayat migration. Target PostgreSQL berisi contoh data penerbangan pada schema `flight_ops` dan `maintenance`; target MariaDB berisi tabel `airports` dan `flights` pada database `target`. Kedua Test DB menggunakan tmpfs sehingga datanya bersifat sementara. Jalankan service `mariadb-test` secara eksplisit untuk pengujian MariaDB.
 
 ### 2. Isi konfigurasi dan buat admin pertama
 
@@ -138,6 +141,7 @@ Untuk menghentikan aplikasi, tekan `Ctrl+C`. Untuk menghentikan database, jalank
 | `SESSION_ROTATION_INTERVAL` | `15m` | Interval rotasi identifier |
 | `SESSION_GRACE_PERIOD` | `30s` | Masa berlaku identifier sebelumnya setelah rotasi |
 | `TEST_DATABASE_URL` | `postgres://test:test@localhost:5435/test?sslmode=disable` | Koneksi instance PostgreSQL khusus pengujian |
+| `TEST_MARIADB_DSN` | `root:test@tcp(127.0.0.1:3308)/` | Opsional; instance MariaDB khusus integration test, diisi melalui environment |
 
 Durasi menggunakan format Go, misalnya `30m` atau `8h`. Konfigurasi harus memenuhi `0 < grace < rotation < absolute` dan `0 < idle <= absolute`.
 
@@ -150,7 +154,7 @@ Pada production, gunakan reverse proxy HTTPS, `APP_ENV=production`, origin HTTPS
 1. Login sebagai Platform Admin.
 2. Buka **Pengguna** untuk membuat akun pengguna.
 3. Buka **Group & anggota**, buat group, lalu tambahkan pengguna sebagai anggota.
-4. Buka **Koneksi database** dan daftarkan Target DB contoh:
+4. Buka **Koneksi database**, pilih DBMS **PostgreSQL**, dan daftarkan Target DB contoh:
 
    | Field | Nilai |
    |---|---|
@@ -178,6 +182,23 @@ Pada production, gunakan reverse proxy HTTPS, `APP_ENV=production`, origin HTTPS
 10. Periksa status dan detail migration. SQL sukses di-commit; SQL gagal di-rollback dan hasilnya dicatat pada riwayat.
 
 Platform Admin tetap memerlukan keanggotaan group dan grant untuk membuka database. Tambahkan akun admin ke group bila admin juga ingin menggunakan explorer atau menjalankan migration.
+
+### Target MariaDB (bonus DBMS tambahan)
+
+Pada **Koneksi database**, pilih `MariaDB`, host `localhost`, port `3307`, database `target`, username/password `target`, dan SSL `disable` untuk target Compose lokal. Pada explorer MariaDB, database koneksi ditampilkan sebagai schema. Grant View/Edit dan pemeriksaan backend berlaku sama seperti PostgreSQL. Gunakan akun target yang haknya dibatasi pada database tersebut.
+
+SSL MariaDB mendukung `disable`, `require` (enkripsi tanpa verifikasi sertifikat), dan `verify-full` (verifikasi sertifikat serta hostname). MariaDB sebelum 10.6.1 dan DBMS yang tidak didukung ditolak saat test/open connection. Koneksi PostgreSQL yang sudah ada tetap bertipe PostgreSQL setelah migrasi platform otomatis `0002_connection_dbms`.
+
+Aturan migration MariaDB:
+
+- Satu migration schema berisi **tepat satu statement DDL** tabel/index/view. Contoh: `ALTER TABLE flights ADD COLUMN gate VARCHAR(10);`.
+- DDL MariaDB melakukan implicit commit. Batch beberapa DDL atau campuran DDL-DML ditolak saat menyimpan dan sebelum eksekusi; aplikasi tidak menjanjikan rollback transaksi untuk DDL.
+- Batch `INSERT`, `UPDATE`, `DELETE`, `REPLACE`, dan `SELECT` dijalankan dalam transaksi. Database yang mengandung tabel non-InnoDB ditolak untuk batch DML dan analisis plan.
+- Kontrol transaksi, perintah administrasi, executable comments, `CREATE OR REPLACE TABLE`, `CREATE TABLE AS SELECT/LIKE`, DDL partisi, serta DROP/RENAME beberapa objek tidak didukung. Referensi ke database lain ditolak.
+- Execution plan DML ditampilkan sebagai JSON native dari `EXPLAIN FORMAT=JSON` atau `ANALYZE FORMAT=JSON`. Analisis selalu di-rollback. DDL tidak dianalisis karena dapat melakukan implicit commit.
+- Riwayat dan penomoran versi tetap dicatat pada Platform DB. Jika server/koneksi terputus saat eksekusi, periksa kondisi Target DB sebelum membuat migration perbaikan.
+
+Perbedaan transaksi ini mengikuti [implicit commit MariaDB](https://mariadb.com/docs/server/reference/sql-statements/transactions/sql-statements-that-cause-an-implicit-commit) dan [atomic DDL MariaDB](https://mariadb.com/docs/server/reference/sql-statements/data-definition/atomic-ddl).
 
 ## Aturan Akses dan Session
 
@@ -207,7 +228,7 @@ Akses diberikan melalui group. Jika pengguna tergabung dalam beberapa group, aks
 
 - Draft belum memiliki nomor versi dan masih dapat diubah. Saat dieksekusi, versi berikutnya dihitung per database dan status berubah menjadi `running`, lalu `success` atau `failed`.
 - Migration yang sudah dieksekusi tidak dapat diubah atau dijalankan ulang pada baris yang sama. Perbaikan dilakukan dengan membuat draft baru dari migration sebelumnya.
-- SQL dijalankan dalam satu transaksi Target DB dengan lock timeout 5 detik dan statement timeout 60 detik.
+- SQL PostgreSQL dijalankan dalam satu transaksi Target DB dengan lock timeout 5 detik dan statement timeout 60 detik. MariaDB menggunakan aturan DDL/DML pada bagian bonus di atas, dengan named lock per database dan batas waktu eksekusi.
 - Perintah pengendali transaksi seperti `BEGIN`/`COMMIT` serta perintah yang tidak dapat dijalankan dalam transaksi, seperti `VACUUM` dan `CREATE INDEX CONCURRENTLY`, ditolak.
 - Platform DB dan Target DB menggunakan transaksi terpisah. Jika server berhenti ketika migration berjalan, startup berikutnya menandainya `failed`; kondisi Target DB perlu diperiksa sesuai pesan pada riwayat.
 
@@ -217,15 +238,17 @@ Untuk menjalankan seluruh test, pastikan Test DB aktif dan `TEST_DATABASE_URL` s
 
 ```powershell
 docker compose up -d --wait test-db
+docker compose up -d --wait mariadb-test
 $env:TEST_DATABASE_URL = 'postgres://test:test@localhost:5435/test?sslmode=disable'
+$env:TEST_MARIADB_DSN = 'root:test@tcp(127.0.0.1:3308)/'
 go vet ./...
 go test ./... -count=1
 go test -race ./... -count=1
 ```
 
-Pada Bash, gunakan `export TEST_DATABASE_URL='postgres://test:test@localhost:5435/test?sslmode=disable'`. Race detector memerlukan dukungan CGO dan compiler C pada platform yang digunakan.
+Pada Bash, gunakan `export TEST_DATABASE_URL='postgres://test:test@localhost:5435/test?sslmode=disable'` dan `export TEST_MARIADB_DSN='root:test@tcp(127.0.0.1:3308)/'`. Race detector memerlukan dukungan CGO dan compiler C pada platform yang digunakan.
 
-Jika `TEST_DATABASE_URL` kosong, test yang memerlukan database akan di-skip. Helper pengujian membuat ulang database bernama `it_*` pada instance tersebut dan membutuhkan hak `CREATE DATABASE`; gunakan instance khusus test.
+Jika `TEST_DATABASE_URL` atau `TEST_MARIADB_DSN` kosong, test yang membutuhkan instance terkait akan di-skip. Helper pengujian membuat ulang database/schema bernama `it_*` dan membutuhkan hak `CREATE DATABASE`; gunakan instance khusus test. Blackbox multi-DBMS juga membuat user uji MariaDB dengan grant terbatas pada schema fixture sehingga membutuhkan akun admin pada instance test.
 
 | Area | Cakupan pengujian |
 |---|---|
@@ -235,6 +258,7 @@ Jika `TEST_DATABASE_URL` kosong, test yang memerlukan database akan di-skip. Hel
 | Admin dan otorisasi | Bootstrap admin, pengguna, group/anggota, grant efektif, matriks akses, serta akses yang ditolak |
 | Koneksi | Enkripsi/dekripsi, validasi key, registry, dan test connection |
 | Explorer dan migration | Schema/data, pagination, validasi SQL, eksekusi sukses/gagal, rollback, versi, dan riwayat |
+| Multi-DBMS | Upgrade metadata lama, driver/cache, scope database, explorer MariaDB, DDL/DML, rollback InnoDB, plan native, dan blackbox HTTPS untuk kedua DBMS |
 
 ## Perintah Makefile
 

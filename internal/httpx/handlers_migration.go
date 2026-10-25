@@ -111,7 +111,7 @@ func (s *Server) migrationExplain(w http.ResponseWriter, r *http.Request) {
 		s.migrationError(w, r, err)
 		return
 	}
-	plan, err := migration.Explain(r.Context(), target, m.SQL, r.PostFormValue("analyze") == "1")
+	plan, err := migration.ExplainTarget(r.Context(), target, m.SQL, r.PostFormValue("analyze") == "1")
 	var ve migration.ValidationError
 	switch {
 	case err == nil:
@@ -234,7 +234,7 @@ func (s *Server) migrationExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, _ := reqctx.CurrentPrincipal(r.Context())
-	err := migration.Execute(r.Context(), s.DB, target, connID, id, p.UserID)
+	err := migration.ExecuteTarget(r.Context(), s.DB, target, connID, id, p.UserID)
 	var ve migration.ValidationError
 	switch {
 	case err == nil:
