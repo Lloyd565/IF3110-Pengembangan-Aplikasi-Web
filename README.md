@@ -36,6 +36,7 @@ Alur utama: **Login → Pilih database → Lihat schema/data → Buat draft migr
 - Dashboard database sesuai hak akses pengguna.
 - Explorer schema, tabel, kolom, constraint, index, dan data dengan pagination 50 baris per halaman.
 - Pembuatan dan pengubahan draft migration, eksekusi SQL dalam transaksi, serta riwayat hasil eksekusi.
+- Schema diff terhadap schema referensi dan pembuatan draft SQL migration yang dapat ditinjau serta diedit sebelum eksekusi.
 - Unit test, integration test dengan PostgreSQL, dan blackbox HTTP/HTTPS.
 
 ## Menjalankan Aplikasi
@@ -184,6 +185,24 @@ Perbedaan transaksi ini mengikuti [implicit commit MariaDB](https://mariadb.com/
 
 ## Aturan Akses dan Session
 
+### Schema diff dan migration generation (bonus)
+
+1. Buka **Schema diff** dari Explorer Schema atau Riwayat Migration pada database aktif.
+2. Pilih koneksi referensi yang berisi kondisi schema yang diinginkan, lalu klik **Muat pilihan schema**. Referensi dapat berupa schema lain pada koneksi yang sama atau koneksi lain dengan DBMS yang sama.
+3. Pilih schema aktif dan schema referensi, lalu klik **Bandingkan dan buat SQL kandidat**. Kedua koneksi memerlukan hak View.
+4. Tinjau perubahan dan SQL. Perbandingan mencakup tabel biasa, kolom bertipe builtin, default, nullability, primary/unique/foreign key, check, serta index BTREE biasa. Foreign key lokal dipetakan ke schema aktif dan SQL diurutkan sesuai dependensi.
+5. Dengan hak Edit pada database aktif, beri nama lalu simpan draft. Perubahan yang menghapus tabel/kolom atau mengubah tipe memerlukan pengakuan risiko pada form. Rename tidak ditebak: nama yang hilang/baru dianggap hapus/tambah.
+6. PostgreSQL membuat satu draft gabungan dan membuka editor. MariaDB membuat draft terpisah untuk tiap statement DDL dan menampilkan urutan pengerjaannya. Tinjau/edit setiap draft sebelum mengeksekusinya melalui alur migration biasa.
+7. Setelah eksekusi selesai, bandingkan kembali untuk memeriksa kondisi schema.
+
+Preview dan penyimpanan draft tidak menjalankan DDL pada target maupun referensi. Server menghitung ulang SQL dari katalog, memeriksa ulang hak akses, dan menolak penyimpanan jika fingerprint schema berubah sejak preview (`409`). Fingerprint mencakup metadata yang dibandingkan, bukan data tabel atau nilai counter sequence. Batch draft disimpan secara atomik pada Platform DB; hal ini tidak membuat seluruh batch DDL MariaDB menjadi satu transaksi.
+
+Objek/atribut khusus seperti view, partition/inheritance, trigger, kolom generated, tipe/domain/enum khusus, expression/partial index, custom operator class/collation, opsi sequence khusus, dan foreign key lintas schema memerlukan penanganan manual. Ketika metadata tersebut menghalangi perbandingan yang dapat digenerasikan, tombol simpan otomatis dinonaktifkan. Perbandingan bukan salinan data atau seluruh objek database: komentar, owner, grant, definisi fungsi, serta sequence mandiri berada di luar cakupan. Komentar kolom MariaDB yang sudah ada dipertahankan ketika kolom diubah.
+
+Tidak ada `DROP CASCADE` otomatis. Konversi tipe, NOT NULL, dan constraint baru tetap dapat gagal jika data aktif tidak memenuhi syarat; tinjau data dan sesuaikan SQL pada editor. Batas satu perbandingan adalah 200 tabel, 2000 kolom, dan 250 statement.
+
+Endpoint fitur: `GET/POST /db/{id}/schema/diff` untuk form/preview dan `POST /db/{id}/schema/diff/draft` untuk penyimpanan. POST tetap memerlukan CSRF; View Only dapat membandingkan tetapi tidak menyimpan draft.
+
 ### Hak akses database
 
 | Kemampuan | Tanpa grant | View Only (`view`) | View + Edit (`edit`) |
@@ -241,6 +260,7 @@ Jika `TEST_DATABASE_URL` atau `TEST_MARIADB_DSN` kosong, test yang membutuhkan i
 | Koneksi | Enkripsi/dekripsi, validasi key, registry, dan test connection |
 | Explorer dan migration | Schema/data, pagination, validasi SQL, eksekusi sukses/gagal, rollback, versi, dan riwayat |
 | Multi-DBMS | Upgrade metadata lama, driver/cache, scope database, explorer MariaDB, DDL/DML, rollback InnoDB, plan native, dan blackbox HTTPS untuk kedua DBMS |
+| Schema diff | Diff deterministik, quote identifier, urutan dependensi, round-trip DDL pada kedua DBMS, preservasi data, metadata khusus, drift fingerprint, CSRF/hak akses, draft yang dapat diedit, serta atomic batch save |
 
 ## Perintah Makefile
 
@@ -272,6 +292,7 @@ internal/
   migration/       Draft, executor, dan riwayat migration
   platformdb/      Migrasi schema Platform DB
   reqctx/          Principal dan CSRF token dalam request context
+  schemadiff/      Snapshot katalog, perbandingan schema, dan SQL kandidat
   testdb/          Helper PostgreSQL untuk integration test
   user/            Repository pengguna
 scripts/           Seed data Target DB

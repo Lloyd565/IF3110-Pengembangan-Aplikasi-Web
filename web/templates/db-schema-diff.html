@@ -1,0 +1,64 @@
+{{define "title"}}Schema diff &amp; migration generation{{end}}
+{{define "content"}}
+{{$v := .Data}}{{$id := $v.ConnID}}
+<nav class="crumbs"><a href="/dashboard">Dashboard</a> / <a href="/db/{{$id}}/schema">Schema</a> / Schema diff</nav>
+<div class="page-head"><h1>Schema diff &amp; migration generation</h1></div>
+<p>Bandingkan schema aktif dengan schema referensi yang diinginkan. SQL kandidat dapat ditinjau lalu disimpan sebagai draft yang masih dapat diedit. Perbandingan dan penyimpanan draft tidak menjalankan perubahan pada database target.</p>
+{{with $v.Error}}<p class="alert" role="alert">{{.}}</p>{{end}}
+<section class="card">
+  <h2>1. Pilih koneksi referensi</h2>
+  <form method="get" action="/db/{{$id}}/schema/diff" class="editor">
+    <input type="hidden" name="source_schema" value="{{$v.SourceSchema}}">
+    <label for="reference-connection">Koneksi referensi</label>
+    <select id="reference-connection" name="reference_id">
+    {{range $v.References}}<option value="{{.ConnectionID}}"{{if eq .ConnectionID $v.ReferenceID}} selected{{end}}>{{.Name}}</option>{{end}}
+    </select>
+    <div><button type="submit" class="secondary">Muat pilihan schema</button></div>
+  </form>
+</section>
+<section class="card">
+  <h2>2. Bandingkan kondisi schema</h2>
+  <form method="post" action="/db/{{$id}}/schema/diff" class="editor">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <input type="hidden" name="reference_id" value="{{$v.ReferenceID}}">
+    <label for="source-schema">Schema aktif yang akan menerima migration</label>
+    <select id="source-schema" name="source_schema" required>{{range $v.SourceSchemas}}<option value="{{.Name}}"{{if eq .Name $v.SourceSchema}} selected{{end}}>{{.Name}}</option>{{end}}</select>
+    <label for="reference-schema">Kondisi yang diinginkan: schema di koneksi {{$v.ReferenceName}}</label>
+    <select id="reference-schema" name="reference_schema" required>{{range $v.ReferenceSchemas}}<option value="{{.Name}}"{{if eq .Name $v.ReferenceSchema}} selected{{end}}>{{.Name}}</option>{{end}}</select>
+    <div><button type="submit">Bandingkan dan buat SQL kandidat</button></div>
+  </form>
+  <p class="muted">Gunakan DBMS yang sama. Perbandingan mencakup tabel biasa, kolom, default, nullability, primary/unique/foreign key, check, dan index BTREE. Rename dianggap sebagai hapus/tambah. Data, komentar, owner, grant, serta nilai counter sequence tidak dibandingkan.</p>
+</section>
+{{with $v.Plan}}
+<section class="card" id="diff-result" data-source-hash="{{$v.SourceHash}}" data-reference-hash="{{$v.ReferenceHash}}">
+  <h2>Hasil perbandingan</h2>
+  {{if .Changes}}
+  <table><thead><tr><th>Objek</th><th>Perubahan</th><th>Risiko</th></tr></thead><tbody>
+  {{range .Changes}}<tr><td><code>{{.Object}}</code></td><td>{{.Description}}</td><td>{{if .Destructive}}Dapat menghapus data / mengubah tipe{{else}}Tinjau SQL dan data yang ada{{end}}</td></tr>{{end}}
+  </tbody></table>
+  {{else}}<p>Tidak ada perbedaan dalam cakupan schema yang dibandingkan.</p>{{end}}
+  {{range .Warnings}}<p class="muted">{{.}}</p>{{end}}
+  {{if .Manual}}<div class="alert"><strong>Penanganan manual diperlukan. Penyimpanan draft otomatis dinonaktifkan.</strong><ul>{{range .Manual}}<li>{{.}}</li>{{end}}</ul></div>{{end}}
+</section>
+{{if .Steps}}
+<section class="card">
+  <h2>SQL kandidat (belum dieksekusi)</h2>
+  <pre class="sql">{{.SQL}}</pre>
+  <p class="muted">Periksa kehilangan data, konversi tipe, dan dependensi sebelum eksekusi. PostgreSQL menyimpan satu draft gabungan; MariaDB menyimpan satu draft per statement, yang harus dijalankan sesuai urutan. Objek/atribut khusus yang belum didukung ditandai untuk penanganan manual.</p>
+  {{if and $v.CanCreate (not .Manual)}}
+  <form method="post" action="/db/{{$id}}/schema/diff/draft" class="editor">
+    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+    <input type="hidden" name="reference_id" value="{{$v.ReferenceID}}">
+    <input type="hidden" name="source_schema" value="{{$v.SourceSchema}}">
+    <input type="hidden" name="reference_schema" value="{{$v.ReferenceSchema}}">
+    <input type="hidden" name="source_hash" value="{{$v.SourceHash}}">
+    <input type="hidden" name="reference_hash" value="{{$v.ReferenceHash}}">
+    <label for="diff-name">Nama migration</label><input id="diff-name" type="text" name="name" value="{{$v.Name}}" required maxlength="180">
+    {{if .Destructive}}<label><input type="checkbox" name="ack_destructive" value="1" required{{if $v.Acknowledged}} checked{{end}}> Saya sudah meninjau risiko penghapusan data dan perubahan tipe.</label>{{end}}
+    <div><button type="submit">Simpan sebagai draft untuk ditinjau</button></div>
+  </form>
+  {{else if not $v.CanCreate}}<p class="muted">Hak Edit diperlukan untuk menyimpan draft migration.</p>{{end}}
+</section>
+{{end}}
+{{end}}
+{{end}}
