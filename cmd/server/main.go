@@ -54,12 +54,6 @@ func main() {
 	if err := platformdb.Migrate(context.Background(), pool); err != nil {
 		log.Fatalf("migrasi platform DB gagal: %v", err)
 	}
-	if n, err := migration.RecoverInterrupted(context.Background(), pool); err != nil {
-		log.Fatalf("pemulihan migration yang terputus gagal: %v", err)
-	} else if n > 0 {
-		log.Printf("PERINGATAN: %d migration yang terputus ditandai failed; periksa Target DB secara manual", n)
-	}
-
 	encKey, err := dbconn.ParseKey(os.Getenv("ENCRYPTION_KEY"))
 	if err != nil {
 		if cfg.Production {
@@ -70,6 +64,12 @@ func main() {
 
 	conns := &dbconn.Registry{DB: pool, Key: encKey}
 	defer conns.Close()
+
+	if n, err := migration.RecoverInterrupted(context.Background(), pool, conns.Target); err != nil {
+		log.Fatalf("pemulihan migration yang terputus gagal: %v", err)
+	} else if n > 0 {
+		log.Printf("PERINGATAN: %d migration terputus disinkronkan dengan riwayat di Target DB", n)
+	}
 	srv := &httpx.Server{
 		PublicOrigin: cfg.PublicOrigin,
 		DB:           pool,

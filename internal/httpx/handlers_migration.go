@@ -265,6 +265,8 @@ func (s *Server) migrationExecute(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, migration.ErrTargetUnavailable):
 		log.Printf("execute %s/%d: %v", connID, id, err)
 		s.renderError(w, r, http.StatusBadGateway, "Database target tidak dapat dihubungi. Migration tersimpan di draft.")
+	case errors.Is(err, migration.ErrStatusPending):
+		s.renderError(w, r, http.StatusServiceUnavailable, "Migration sudah selesai dijalankan di database target, tetapi statusnya belum tersimpan di platform. Status akan disinkronkan otomatis; jangan jalankan ulang SQL yang sama.")
 	default:
 		s.migrationError(w, r, err)
 	}
