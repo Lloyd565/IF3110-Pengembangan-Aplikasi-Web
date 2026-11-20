@@ -1,7 +1,11 @@
 .PHONY: run test test-integration vet build db-up
 
-run:
+# .env dibuat otomatis (kunci acak + admin) jika belum ada
+run: .env db-up
 	go run ./cmd/server
+
+.env:
+	go run ./cmd/envinit
 
 test:
 	go test ./...

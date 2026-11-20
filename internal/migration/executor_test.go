@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/platformdb"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/testdb"
 )
@@ -305,16 +307,104 @@ func TestExecute(t *testing.T) {
 		}
 	})
 
-	t.Run("pemulihan saat start: running jadi failed", func(t *testing.T) {
-		id := e.draft(t, "SELECT 1")
-		e.forceRunning(t, id)
-		n, err := RecoverInterrupted(ctx, e.platform)
-		if err != nil || n != 1 {
-			t.Fatalf("n = %d, err = %v", n, err)
+	t.Run("riwayat di target ikut transaksi migration", func(t *testing.T) {
+		ok := e.draft(t, "CREATE TABLE hist_ok (id int);")
+		bad := e.draft(t, "CREATE TABLE hist_bad (id int); SELECT 1/0;")
+		for _, id := range []int64{ok, bad} {
+			if err := Execute(ctx, e.platform, e.target, connA, id, 1); err != nil {
+				t.Fatal(err)
+			}
 		}
-		m := e.get(t, id)
-		if m.Status != StatusFailed || !strings.Contains(*m.ErrorMessage, "Periksa Target DB") {
-			t.Errorf("hasil = %s, %v", m.Status, m.ErrorMessage)
+		if !e.inHistory(t, ok) || e.inHistory(t, bad) {
+			t.Errorf("riwayat: sukses=%v gagal=%v; mau true, false", e.inHistory(t, ok), e.inHistory(t, bad))
 		}
 	})
+
+	t.Run("hasil ambigu (koneksi putus saat commit): target yang menentukan", func(t *testing.T) {
+		applied := e.draft(t, "CREATE TABLE ambiguous_ok (id int);")
+		r := pgRunner(e.target)
+		run := r.run
+		r.run = func(ctx context.Context, id int64, sql string) error {
+			if err := run(ctx, id, sql); err != nil {
+				return err
+			}
+			return errors.New("koneksi putus")
+		}
+		if err := execute(ctx, e.platform, connA, applied, 1, r); err != nil {
+			t.Fatal(err)
+		}
+		if m := e.get(t, applied); m.Status != StatusSuccess {
+			t.Errorf("status = %s, mau success (commit sebenarnya berhasil)", m.Status)
+		}
+
+		notApplied := e.draft(t, "CREATE TABLE ambiguous_no (id int);")
+		r.run = func(context.Context, int64, string) error { return errors.New("koneksi putus") }
+		if err := execute(ctx, e.platform, connA, notApplied, 1, r); err != nil {
+			t.Fatal(err)
+		}
+		if m := e.get(t, notApplied); m.Status != StatusFailed {
+			t.Errorf("status = %s, mau failed", m.Status)
+		}
+	})
+
+	t.Run("platform gagal menyimpan status: disinkronkan ulang di background", func(t *testing.T) {
+		id := e.draft(t, "CREATE TABLE pending_ok (id int);")
+		r := pgRunner(e.target)
+		run := r.run
+		r.run = func(ctx context.Context, id int64, sql string) error {
+			err := run(ctx, id, sql)
+			// Simulasikan platform DB menolak update status.
+			e.platform.Exec(ctx, `ALTER TABLE migrations ADD CONSTRAINT block_settle CHECK (status <> 'success') NOT VALID`)
+			return err
+		}
+		if err := execute(ctx, e.platform, connA, id, 1, r); !errors.Is(err, ErrStatusPending) {
+			t.Fatalf("err = %v, mau ErrStatusPending", err)
+		}
+		if m := e.get(t, id); m.Status != StatusRunning {
+			t.Fatalf("status = %s, mau tetap running", m.Status)
+		}
+		if _, err := e.platform.Exec(ctx, `ALTER TABLE migrations DROP CONSTRAINT block_settle`); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for e.get(t, id).Status == StatusRunning && time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+		}
+		if m := e.get(t, id); m.Status != StatusSuccess {
+			t.Errorf("status = %s, mau success setelah retry", m.Status)
+		}
+	})
+
+	t.Run("pemulihan saat start: status mengikuti riwayat di target", func(t *testing.T) {
+		applied := e.draft(t, "SELECT 1")
+		e.forceRunning(t, applied)
+		if _, err := e.target.Exec(ctx, `INSERT INTO `+pgHistory+` (migration_id) VALUES ($1)`, applied); err != nil {
+			t.Fatal(err)
+		}
+		lost := e.draft(t, "SELECT 1")
+		e.forceRunning(t, lost)
+
+		open := func(context.Context, uuid.UUID) (*dbconn.Target, error) {
+			return &dbconn.Target{DBMS: dbconn.PostgreSQL, Postgres: e.target}, nil
+		}
+		if n, err := RecoverInterrupted(ctx, e.platform, open); err != nil || n != 2 {
+			t.Fatalf("n = %d, err = %v", n, err)
+		}
+		if m := e.get(t, applied); m.Status != StatusSuccess {
+			t.Errorf("ada di riwayat: status = %s, mau success", m.Status)
+		}
+		if m := e.get(t, lost); m.Status != StatusFailed || !strings.Contains(*m.ErrorMessage, "tidak di-commit") {
+			t.Errorf("tidak ada di riwayat: status = %s, %v", m.Status, m.ErrorMessage)
+		}
+	})
+}
+
+func (e execEnv) inHistory(t *testing.T, id int64) bool {
+	t.Helper()
+	var ok bool
+	if err := e.target.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM `+pgHistory+` WHERE migration_id = $1)`, id).Scan(&ok); err != nil {
+		t.Fatal(err)
+	}
+	return ok
 }

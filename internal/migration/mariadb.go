@@ -5,8 +5,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
-	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -315,10 +315,52 @@ func createTableLike(tokens []mariaToken) bool {
 }
 
 func ExecuteTarget(ctx context.Context, platform *pgxpool.Pool, target *dbconn.Target, connID uuid.UUID, id, userID int64) error {
+	return execute(ctx, platform, connID, id, userID, targetRunner(target))
+}
+
+func targetRunner(target *dbconn.Target) runner {
 	if target.DBMS == dbconn.PostgreSQL {
-		return Execute(ctx, platform, target.Postgres, connID, id, userID)
+		return pgRunner(target.Postgres)
 	}
-	return execute(ctx, platform, connID, id, userID, func(source string) error { return checkMariaDatabase(source, target.Database) }, target.Ping, func(ctx context.Context, sql string) error { return runMaria(ctx, target, sql) })
+	return runner{
+		validate: func(source string) error { return checkMariaDatabase(source, target.Database) },
+		ping:     target.Ping,
+		run:      func(ctx context.Context, id int64, sql string) error { return runMaria(ctx, target, id, sql) },
+		applied:  func(ctx context.Context, id int64, sql string) (bool, error) { return appliedMaria(ctx, target, id, sql) },
+	}
+}
+
+const mariaHistory = "_platform_migrations"
+
+func ensureMariaHistory(ctx context.Context, conn *sql.Conn) error {
+	// Cek dulu: CREATE TABLE IF NOT EXISTS tetap butuh hak CREATE walau tabel sudah ada.
+	var n int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?`, mariaHistory).Scan(&n); err != nil || n > 0 {
+		return err
+	}
+	_, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS `+mariaHistory+` (
+		migration_id BIGINT PRIMARY KEY,
+		applied_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB`)
+	return err
+}
+
+func appliedMaria(ctx context.Context, target *dbconn.Target, id int64, source string) (bool, error) {
+	var ok bool
+	// withMaria mengambil lock yang sama dengan migration, jadi menunggu migration yang masih jalan.
+	err := withMaria(ctx, target, func(ctx context.Context, conn *sql.Conn) error {
+		var n int
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?`, mariaHistory).Scan(&n); err != nil || n == 0 {
+			return err
+		}
+		return conn.QueryRowContext(ctx, `SELECT COUNT(*) > 0 FROM `+mariaHistory+` WHERE migration_id=?`, id).Scan(&ok)
+	})
+	if err == nil && !ok {
+		// DDL MariaDB commit sendiri sebelum riwayat ditulis: tanpa riwayat, hasilnya tidak pasti.
+		if _, ddl, _ := mariaSQL(source); ddl {
+			return false, errManualCheck
+		}
+	}
+	return ok, err
 }
 
 func withMaria(ctx context.Context, target *dbconn.Target, fn func(context.Context, *sql.Conn) error) error {
@@ -364,7 +406,7 @@ func requireInnoDB(ctx context.Context, conn *sql.Conn, database string) error {
 	return nil
 }
 
-func runMaria(ctx context.Context, target *dbconn.Target, source string) error {
+func runMaria(ctx context.Context, target *dbconn.Target, id int64, source string) error {
 	stmts, ddl, err := mariaSQL(source)
 	if err != nil {
 		return err
@@ -373,9 +415,19 @@ func runMaria(ctx context.Context, target *dbconn.Target, source string) error {
 		return err
 	}
 	return withMaria(ctx, target, func(ctx context.Context, conn *sql.Conn) error {
-		if ddl {
-			_, err := conn.ExecContext(ctx, stmts[0].SQL)
+		if err := ensureMariaHistory(ctx, conn); err != nil {
 			return err
+		}
+		record := `INSERT INTO ` + mariaHistory + ` (migration_id) VALUES (?)`
+		if ddl {
+			if _, err := conn.ExecContext(ctx, stmts[0].SQL); err != nil {
+				return err
+			}
+			// DDL sudah ter-commit; gagal mencatat riwayat tidak membatalkannya.
+			if _, err := conn.ExecContext(ctx, record, id); err != nil {
+				log.Printf("migration %d: DDL berhasil tetapi riwayat MariaDB gagal dicatat: %v", id, err)
+			}
+			return nil
 		}
 		if err := requireInnoDB(ctx, conn, target.Database); err != nil {
 			return err
@@ -390,57 +442,16 @@ func runMaria(ctx context.Context, target *dbconn.Target, source string) error {
 				return err
 			}
 		}
+		if _, err := tx.ExecContext(ctx, record, id); err != nil {
+			return err
+		}
 		return tx.Commit()
 	})
 }
 
 func ExplainTarget(ctx context.Context, target *dbconn.Target, source string, analyze bool) (*Plan, error) {
-	if target.DBMS == dbconn.PostgreSQL {
-		return Explain(ctx, target.Postgres, source, analyze)
+	if target.DBMS != dbconn.PostgreSQL {
+		return nil, ValidationError("Execution plan hanya tersedia untuk PostgreSQL.")
 	}
-	stmts, ddl, err := mariaSQL(source)
-	if err != nil {
-		return nil, err
-	}
-	if err := mariaScope(stmts, target.Database); err != nil {
-		return nil, err
-	}
-	if ddl {
-		return nil, ValidationError("MariaDB: DDL tidak dapat dianalisis dalam transaksi rollback karena implicit commit. Analisis hanya tersedia untuk DML.")
-	}
-	plan := &Plan{Analyze: analyze}
-	err = withMaria(ctx, target, func(ctx context.Context, conn *sql.Conn) error {
-		if err := requireInnoDB(ctx, conn, target.Database); err != nil {
-			return err
-		}
-		tx, err := conn.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		for i, st := range stmts {
-			prefix := "EXPLAIN FORMAT=JSON "
-			if analyze {
-				prefix = "ANALYZE FORMAT=JSON "
-			}
-			var raw string
-			if err := tx.QueryRowContext(ctx, prefix+st.SQL).Scan(&raw); err != nil {
-				return ValidationError(fmt.Sprintf("Statement #%d: %s", i+1, err))
-			}
-			var value any
-			if err := json.Unmarshal([]byte(raw), &value); err != nil {
-				return err
-			}
-			formatted, err := json.MarshalIndent(value, "", "  ")
-			if err != nil {
-				return err
-			}
-			plan.Statements = append(plan.Statements, StatementPlan{N: i + 1, SQL: st.SQL, Explained: true, RawJSON: string(formatted)})
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return plan, nil
+	return Explain(ctx, target.Postgres, source, analyze)
 }

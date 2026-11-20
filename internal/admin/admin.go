@@ -238,11 +238,15 @@ func (s *Service) AddMember(ctx context.Context, actor, groupID, userID int64) e
 	return nil
 }
 
-// RemoveMember: tidak perlu cabut session; authz.Can membaca grant tiap request.
 func (s *Service) RemoveMember(ctx context.Context, actor, groupID, userID int64) error {
 	if _, err := s.DB.Exec(ctx,
 		`DELETE FROM group_members WHERE group_id = $1 AND user_id = $2`, groupID, userID); err != nil {
 		return err
+	}
+	if userID != actor {
+		if err := s.Sessions.RevokeAllForUser(ctx, userID); err != nil {
+			return err
+		}
 	}
 	s.audit(ctx, actor, "group.remove_member", fmt.Sprintf("group:%d user:%d", groupID, userID))
 	return nil
@@ -444,28 +448,20 @@ func (s *Service) SetGrant(ctx context.Context, actor, groupID int64, connID uui
 		return err
 	}
 
-	if old == "" || (old == "view" && level == "edit") {
-		rows, err := s.DB.Query(ctx, `SELECT user_id FROM group_members WHERE group_id = $1`, groupID)
+	switch {
+	case old == "" || (old == "view" && level == "edit"):
+		ids, err := s.groupMemberIDs(ctx, groupID)
 		if err != nil {
-			return err
-		}
-		var ids []int64
-		for rows.Next() {
-			var id int64
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return err
-			}
-			ids = append(ids, id)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
 			return err
 		}
 		for _, id := range ids {
 			if err := s.Sessions.MarkForceRotate(ctx, id); err != nil {
 				return err
 			}
+		}
+	case old == "edit" && level == "view":
+		if err := s.revokeGroupSessions(ctx, actor, groupID); err != nil {
+			return err
 		}
 	}
 	s.audit(ctx, actor, "grant.set="+level, fmt.Sprintf("group:%d connection:%s", groupID, connID))
@@ -477,7 +473,43 @@ func (s *Service) RemoveGrant(ctx context.Context, actor, groupID int64, connID 
 		`DELETE FROM db_grants WHERE group_id = $1 AND connection_id = $2`, groupID, connID); err != nil {
 		return err
 	}
+	if err := s.revokeGroupSessions(ctx, actor, groupID); err != nil {
+		return err
+	}
 	s.audit(ctx, actor, "grant.remove", fmt.Sprintf("group:%d connection:%s", groupID, connID))
+	return nil
+}
+
+func (s *Service) groupMemberIDs(ctx context.Context, groupID int64) ([]int64, error) {
+	rows, err := s.DB.Query(ctx, `SELECT user_id FROM group_members WHERE group_id = $1`, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (s *Service) revokeGroupSessions(ctx context.Context, actor, groupID int64) error {
+	ids, err := s.groupMemberIDs(ctx, groupID)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if id == actor {
+			continue
+		}
+		if err := s.Sessions.RevokeAllForUser(ctx, id); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

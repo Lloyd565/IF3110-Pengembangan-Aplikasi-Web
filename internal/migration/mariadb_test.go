@@ -143,24 +143,8 @@ func TestIntegrationMariaMigrations(t *testing.T) {
 	if err != nil || m.Status != StatusFailed {
 		t.Fatal("DDL failure", err)
 	}
-	if _, err := ExplainTarget(ctx, target, "CREATE TABLE explain_side_effect(id INT)", true); err == nil {
-		t.Fatal("DDL ANALYZE executed")
-	}
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME='explain_side_effect'", name).Scan(&count); err != nil || count != 0 {
-		t.Fatal("explain modified schema", err)
-	}
-	for _, analyze := range []bool{false, true} {
-		plan, err := ExplainTarget(ctx, target, "SELECT * FROM notes WHERE id=1", analyze)
-		if err != nil || len(plan.Statements) != 1 || plan.Statements[0].RawJSON == "" {
-			t.Fatal("native explain", err)
-		}
-	}
-	if _, err := ExplainTarget(ctx, target, "UPDATE notes SET title='changed' WHERE id=1", true); err != nil {
-		t.Fatal(err)
-	}
-	var title string
-	if err := db.QueryRowContext(ctx, "SELECT title FROM notes WHERE id=1").Scan(&title); err != nil || title != "one" {
-		t.Fatal("ANALYZE did not roll back", err)
+	if _, err := ExplainTarget(ctx, target, "SELECT * FROM notes WHERE id=1", false); !errors.As(err, new(ValidationError)) {
+		t.Fatal("MariaDB explain should be unsupported", err)
 	}
 	if _, err := db.ExecContext(ctx, "CREATE TABLE legacy(id INT) ENGINE=MyISAM"); err != nil {
 		t.Fatal(err)

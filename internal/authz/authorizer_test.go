@@ -3,6 +3,7 @@ package authz
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/google/uuid"
@@ -94,6 +95,28 @@ func TestAuthorizer(t *testing.T) {
 		}
 		if got, _ = az.VisibleConnections(ctx, p(3, true)); len(got) != 0 {
 			t.Errorf("admin tanpa grant tidak melihat database apa pun: %+v", got)
+		}
+	})
+
+	t.Run("VisibleConnections menampilkan group milik sendiri saja", func(t *testing.T) {
+		// user 1 anggota g_view dan g_edit; user 2 hanya g_view. Keduanya terhubung ke A lewat grant.
+		got, err := az.VisibleConnections(ctx, p(1, false))
+		if err != nil || len(got) != 2 {
+			t.Fatalf("user 1: %+v, %v", got, err)
+		}
+		if !slices.Equal(got[0].Groups, []string{"g_edit", "g_view"}) {
+			t.Errorf("user 1 di A: groups = %v, mau [g_edit g_view]", got[0].Groups)
+		}
+		if !slices.Equal(got[1].Groups, []string{"g_edit"}) {
+			t.Errorf("user 1 di B: groups = %v, mau [g_edit]", got[1].Groups)
+		}
+
+		got, err = az.VisibleConnections(ctx, p(2, false))
+		if err != nil || len(got) != 1 {
+			t.Fatalf("user 2: %+v, %v", got, err)
+		}
+		if !slices.Equal(got[0].Groups, []string{"g_view"}) {
+			t.Errorf("user 2 hanya boleh melihat group miliknya (g_view), dapat %v: group g_edit milik user lain tidak boleh bocor", got[0].Groups)
 		}
 	})
 }
