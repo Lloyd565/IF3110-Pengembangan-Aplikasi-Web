@@ -115,6 +115,14 @@ func (r *Registry) Seal(connID uuid.UUID, password string) ([]byte, error) {
 	return Encrypt(key, connID, password)
 }
 
+func (r *Registry) Unseal(connID uuid.UUID, blob []byte) (string, error) {
+	key, err := r.key()
+	if err != nil {
+		return "", err
+	}
+	return Decrypt(key, connID, blob)
+}
+
 func (r *Registry) Pool(ctx context.Context, connID uuid.UUID) (*pgxpool.Pool, error) {
 	target, err := r.Target(ctx, connID)
 	if err != nil {

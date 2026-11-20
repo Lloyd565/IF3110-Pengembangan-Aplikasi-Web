@@ -3,7 +3,7 @@ package httpx
 import (
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -39,7 +39,7 @@ func (s *Server) migrationError(w http.ResponseWriter, r *http.Request, err erro
 	case errors.Is(err, migration.ErrNotDraft):
 		s.renderError(w, r, http.StatusConflict, "Migration ini sudah dieksekusi. Tolong buat draf baru")
 	default:
-		log.Printf("migration %s: %v", r.URL.Path, err)
+		slog.ErrorContext(r.Context(), "migration.operation_failed")
 		s.renderError(w, r, http.StatusInternalServerError, "Terjadi kesalahan saat memproses migration.")
 	}
 }
@@ -138,7 +138,7 @@ func (s *Server) migrationExplain(w http.ResponseWriter, r *http.Request) {
 	case errors.As(err, &ve):
 		s.renderDetail(w, r, p, connID, id, map[string]any{"PlanError": ve.Error()})
 	case errors.Is(err, migration.ErrTargetUnavailable):
-		log.Printf("explain %s/%d: %v", connID, id, err)
+		slog.ErrorContext(r.Context(), "migration.explain_failed", "database_id", connID.String(), "migration_id", id)
 		s.renderError(w, r, http.StatusBadGateway, "Database target tidak dapat dihubungi.")
 	default:
 		s.migrationError(w, r, err)
@@ -263,7 +263,7 @@ func (s *Server) migrationExecute(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, migration.ErrBusy):
 		s.renderError(w, r, http.StatusConflict, "Ada migration lain yang sedang berjalan di database ini.")
 	case errors.Is(err, migration.ErrTargetUnavailable):
-		log.Printf("execute %s/%d: %v", connID, id, err)
+		slog.ErrorContext(r.Context(), "migration.target_unavailable", "database_id", connID.String(), "migration_id", id)
 		s.renderError(w, r, http.StatusBadGateway, "Database target tidak dapat dihubungi. Migration tersimpan di draft.")
 	default:
 		s.migrationError(w, r, err)

@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -33,6 +33,7 @@ type Service struct {
 	Sessions *auth.Sessions
 	Conns    *dbconn.Registry
 	Hash     func(password string) (string, error)
+	LogOnly  bool
 }
 
 func invalid(format string, a ...any) error {
@@ -48,9 +49,15 @@ func pgCode(err error) string {
 }
 
 func (s *Service) audit(ctx context.Context, actor int64, action, target string) {
+	action = strings.ReplaceAll(strings.ReplaceAll(action, "\r", "\\r"), "\n", "\\n")
+	target = strings.ReplaceAll(strings.ReplaceAll(target, "\r", "\\r"), "\n", "\\n")
+	slog.InfoContext(ctx, "admin.activity", "event", action, "actor_id", actor, "target", target)
+	if s.LogOnly {
+		return
+	}
 	if _, err := s.DB.Exec(ctx,
 		`INSERT INTO audit_log (actor_id, action, target) VALUES ($1, $2, $3)`, actor, action, target); err != nil {
-		log.Printf("audit %s: %v", action, err)
+		slog.ErrorContext(ctx, "admin.audit_persistence_failed", "event", action)
 	}
 }
 

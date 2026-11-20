@@ -1,0 +1,7 @@
+.git
+.env
+frontend/node_modules
+web/static/spa
+artifacts
+*.sarif
+*.out

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -55,7 +56,7 @@ func (s *Server) clearCookie(w http.ResponseWriter, r *http.Request, name string
 
 func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/static/") {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" || strings.HasPrefix(r.URL.Path, "/static/") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -122,7 +123,12 @@ func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
-		if err := r.ParseForm(); err != nil {
+		media, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		var parseErr error
+		if media != "application/json" {
+			parseErr = r.ParseForm()
+		}
+		if err := parseErr; err != nil {
 			status := http.StatusBadRequest
 			if errors.As(err, new(*http.MaxBytesError)) {
 				status = http.StatusRequestEntityTooLarge
@@ -135,7 +141,7 @@ func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
 			token = r.PostForm.Get("csrf_token")
 		}
 		want := reqctx.CSRFToken(r.Context())
-		if _, loggedIn := reqctx.CurrentPrincipal(r.Context()); !loggedIn && r.URL.Path == "/login" {
+		if _, loggedIn := reqctx.CurrentPrincipal(r.Context()); !loggedIn && (r.URL.Path == "/login" || r.URL.Path == "/api/auth/login") {
 			if cookie, err := r.Cookie(s.csrfCookieName()); err == nil && s.CSRF.ValidPreSession(cookie.Value) {
 				want = cookie.Value
 			}
@@ -151,6 +157,10 @@ func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := reqctx.CurrentPrincipal(r.Context()); !ok {
+			if isAPI(r) {
+				apiError(w, http.StatusUnauthorized, "unauthenticated", "Silakan login kembali.")
+				return
+			}
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
@@ -185,6 +195,9 @@ func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
 func (s *Server) secureHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'none'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		if s.SPAEnabled {
+			w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")

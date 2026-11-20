@@ -1,0 +1,5 @@
+name: IF3110 application security
+paths-ignore:
+  - frontend/node_modules
+  - web/static/spa
+  - artifacts
