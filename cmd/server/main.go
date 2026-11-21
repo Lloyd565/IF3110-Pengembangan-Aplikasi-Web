@@ -25,6 +25,7 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/observability"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/platformdb"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/user"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/workflow"
 )
 
 func main() {
@@ -96,6 +97,8 @@ func main() {
 		Authz:        &authz.Authorizer{DB: pool},
 		Conns:        conns,
 	}
+	srv.Workflow = &workflow.Service{DB: pool, Authz: srv.Authz}
+	srv.Leaders = &workflow.Leaders{DB: pool}
 	srv.Admin = &admin.Service{
 		LogOnly: true,
 		DB:      pool, Users: &user.Repo{DB: pool}, Sessions: srv.Sessions, Conns: conns, Hash: auth.HashPassword,

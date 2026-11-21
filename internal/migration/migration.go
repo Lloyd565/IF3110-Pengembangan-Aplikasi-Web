@@ -98,6 +98,11 @@ func validateConnection(ctx context.Context, db *pgxpool.Pool, connID uuid.UUID,
 	return name, sql, err
 }
 
+func CheckSQL(ctx context.Context, db *pgxpool.Pool, connID uuid.UUID, sql string) error {
+	_, _, err := validateConnection(ctx, db, connID, "-", sql)
+	return err
+}
+
 const selectSQL = `
 	SELECT m.id, m.connection_id, m.version, m.name, m.sql, m.status, m.error_message,
 	       m.created_by, cu.username::text, m.executed_by, eu.username::text,
