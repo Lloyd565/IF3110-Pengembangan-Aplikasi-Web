@@ -23,9 +23,10 @@ func readMaria(ctx context.Context, target *dbconn.Target, schema string) (Snaps
 	if exists == 0 {
 		return out, ErrNotFound
 	}
+	// _platform_migrations: tabel riwayat milik platform (lihat internal/migration), bukan skema user.
 	rows, err := tx.QueryContext(ctx, `SELECT t.TABLE_NAME,t.TABLE_TYPE,COALESCE(t.ENGINE,''),COALESCE(c.CHARACTER_SET_NAME,''),COALESCE(t.TABLE_COLLATION,''),COALESCE(t.CREATE_OPTIONS,'')
 		FROM information_schema.TABLES t LEFT JOIN information_schema.CHARACTER_SETS c ON LEFT(t.TABLE_COLLATION,LENGTH(c.CHARACTER_SET_NAME)+1)=CONCAT(c.CHARACTER_SET_NAME,'_')
-		WHERE t.TABLE_SCHEMA=? ORDER BY t.TABLE_NAME`, schema)
+		WHERE t.TABLE_SCHEMA=? AND t.TABLE_NAME<>'_platform_migrations' ORDER BY t.TABLE_NAME`, schema)
 	if err != nil {
 		return out, err
 	}
@@ -245,7 +246,7 @@ func readMaria(ctx context.Context, target *dbconn.Target, schema string) (Snaps
 	if err != nil {
 		return out, err
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=? ORDER BY TABLE_NAME`, schema)
+	rows, err = tx.QueryContext(ctx, `SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME<>'_platform_migrations' ORDER BY TABLE_NAME`, schema)
 	if err != nil {
 		return out, err
 	}

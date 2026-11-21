@@ -21,6 +21,7 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/config"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/httpx"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/migration"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/observability"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/platformdb"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/user"
@@ -80,6 +81,12 @@ func main() {
 		observer.Shutdown(ctx)
 	}()
 	log.SetOutput(slog.NewLogLogger(slog.Default().Handler(), slog.LevelInfo).Writer())
+
+	if n, err := migration.RecoverInterrupted(context.Background(), pool, conns.Target); err != nil {
+		log.Fatalf("pemulihan migration yang terputus gagal: %v", err)
+	} else if n > 0 {
+		log.Printf("PERINGATAN: %d migration terputus disinkronkan dengan riwayat di Target DB", n)
+	}
 	srv := &httpx.Server{
 		SPAEnabled:   true,
 		Metrics:      observer.Metrics(),
