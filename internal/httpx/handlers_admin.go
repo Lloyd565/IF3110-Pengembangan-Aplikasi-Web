@@ -3,7 +3,7 @@ package httpx
 import (
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -78,12 +78,12 @@ func adminFlashFor(r *http.Request, err error) (adminFlash, int) {
 	case errors.Is(err, admin.ErrSelf):
 		return adminFlash{Error: "Aksi ini tidak boleh dilakukan pada akun Anda sendiri."}, http.StatusUnprocessableEntity
 	}
-	log.Printf("admin %s: %v", r.URL.Path, err)
+	slog.ErrorContext(r.Context(), "admin.operation_failed")
 	return adminFlash{Error: "Terjadi kesalahan saat memproses permintaan."}, http.StatusInternalServerError
 }
 
 func (s *Server) adminLoadFailed(w http.ResponseWriter, r *http.Request, err error) {
-	log.Printf("admin %s: %v", r.URL.Path, err)
+	slog.ErrorContext(r.Context(), "admin.operation_failed")
 	s.renderError(w, r, http.StatusInternalServerError, "Gagal memuat data.")
 }
 

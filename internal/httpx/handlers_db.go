@@ -2,7 +2,7 @@ package httpx
 
 import (
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -17,6 +17,10 @@ import (
 func (s *Server) dbAuthorize(w http.ResponseWriter, r *http.Request, act authz.Action) (connID uuid.UUID, p reqctx.Principal, ok bool) {
 	p, loggedIn := reqctx.CurrentPrincipal(r.Context())
 	if !loggedIn {
+		if isAPI(r) {
+			apiError(w, http.StatusUnauthorized, "unauthenticated", "Silakan login kembali.")
+			return
+		}
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
@@ -27,7 +31,7 @@ func (s *Server) dbAuthorize(w http.ResponseWriter, r *http.Request, act authz.A
 	}
 	if err := s.Authz.Can(r.Context(), p, connID, act); err != nil {
 		if !errors.Is(err, authz.ErrForbidden) {
-			log.Printf("authz %s %s: %v", connID, act, err)
+			slog.ErrorContext(r.Context(), "authz.backend_failed", "database_id", connID.String(), "action", string(act))
 		}
 		s.renderError(w, r, http.StatusForbidden, "Anda tidak punya akses untuk aksi ini pada database tersebut.")
 		return
@@ -46,7 +50,7 @@ func (s *Server) dbAccess(w http.ResponseWriter, r *http.Request, act authz.Acti
 	}
 	pool, err := s.Conns.Target(r.Context(), connID)
 	if err != nil {
-		log.Printf("pool %s: %v", connID, err)
+		slog.ErrorContext(r.Context(), "database.connection_failed", "database_id", connID.String())
 		s.renderError(w, r, http.StatusBadGateway, "Database target tidak dapat dihubungi.")
 		return
 	}
@@ -58,7 +62,7 @@ func (s *Server) explorerError(w http.ResponseWriter, r *http.Request, err error
 		s.renderError(w, r, http.StatusNotFound, "Tabel tidak ditemukan.")
 		return
 	}
-	log.Printf("explorer %s: %v", r.URL.Path, err)
+	slog.ErrorContext(r.Context(), "explorer.read_failed")
 	s.renderError(w, r, http.StatusBadGateway, "Gagal membaca database target. Coba lagi nanti.")
 }
 

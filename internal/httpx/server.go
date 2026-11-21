@@ -11,6 +11,7 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/admin"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/auth"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/authz"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/contracts"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/web"
@@ -31,6 +32,11 @@ type Server struct {
 	CSRF           auth.CSRF
 	SecureCookies  bool
 	PublicOrigin   string
+	SPAEnabled     bool
+	Workflow       contracts.Workflow
+	Jobs           contracts.Jobs
+	Leaders        contracts.Leaders
+	Metrics        http.Handler
 	loginLimits    *loginLimiter
 	passwordSlots  chan struct{}
 }
@@ -56,6 +62,22 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	s.loginLimits = &loginLimiter{entries: make(map[string]loginWindow)}
 	s.passwordSlots = make(chan struct{}, 4)
+	s.apiRoutes(mux)
+	if s.SPAEnabled {
+		if s.Metrics != nil {
+			mux.Handle("GET /metrics", s.Metrics)
+		}
+		mux.HandleFunc("GET /healthz", s.healthz)
+		mux.HandleFunc("GET /static/", s.spaAsset)
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				s.spaPage(w, r)
+				return
+			}
+			apiError(w, http.StatusGone, "legacy_endpoint_disabled", "Gunakan API dan workflow migration. Eksekusi langsung sudah dinonaktifkan.")
+		})
+		return s.requestIDs(s.recoverMiddleware(s.secureHeaders(s.apiLogging(s.sessionMiddleware(s.csrfMiddleware(mux))))))
+	}
 	protected := func(pattern string, handler http.HandlerFunc) {
 		mux.Handle(pattern, s.requireAuth(handler))
 	}
@@ -97,7 +119,7 @@ func (s *Server) Routes() http.Handler {
 		s.renderError(w, r, http.StatusNotFound, "Halaman tidak ditemukan.")
 	})
 
-	return s.recoverMiddleware(s.secureHeaders(requestLogging(s.sessionMiddleware(s.csrfMiddleware(mux)))))
+	return s.requestIDs(s.recoverMiddleware(s.secureHeaders(requestLogging(s.sessionMiddleware(s.csrfMiddleware(mux))))))
 }
 
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {

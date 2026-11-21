@@ -46,8 +46,8 @@ func VerifyPassword(encoded, password string) bool {
 	if len(params) != 3 {
 		return false
 	}
-	var values [3]uint64
-	for i, prefix := range []string{"m=", "t=", "p="} {
+	var values [2]uint64
+	for i, prefix := range []string{"m=", "t="} {
 		if !strings.HasPrefix(params[i], prefix) {
 			return false
 		}
@@ -57,9 +57,17 @@ func VerifyPassword(encoded, password string) bool {
 		}
 		values[i] = v
 	}
-	memory, rounds, threads := uint32(values[0]), uint32(values[1]), uint8(values[2])
+	parallelism, ok := strings.CutPrefix(params[2], "p=")
+	if !ok {
+		return false
+	}
+	p, err := strconv.ParseUint(parallelism, 10, 8)
+	if err != nil || p == 0 || p > 8 {
+		return false
+	}
+	memory, rounds, threads := uint32(values[0]), uint32(values[1]), uint8(p)
 	// Reject malformed/corrupt records before allocating memory or doing expensive work.
-	if values[2] == 0 || values[2] > 8 || memory < 8*uint32(threads) || memory > 128*1024 || rounds == 0 || rounds > 6 {
+	if memory < 8*uint32(threads) || memory > 128*1024 || rounds == 0 || rounds > 6 {
 		return false
 	}
 	salt, err := base64.RawStdEncoding.Strict().DecodeString(parts[4])

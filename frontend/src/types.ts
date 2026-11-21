@@ -1,0 +1,16 @@
+export type User = { id: number; username: string; is_platform_admin: boolean; is_active?: boolean; created_at?: string }
+export type Capabilities = { workflow: boolean; jobs: boolean; leaders: boolean }
+export type Database = { id: string; name: string; level: 'view' | 'edit'; groups: string[]; dbms: string; database: string }
+export type Connection = { id: string; name: string; host: string; port: number; dbname: string; username: string; sslmode: string; dbms: string }
+export type Group = { id: number; name: string; description: string; members: number; leader: { user_id: number; username: string } | null }
+export type Member = { user_id: number; username: string }
+export type Grant = { group_id: number; group_name: string; connection_id: string; connection_name: string; level: string }
+export type Schema = { name: string; tables: { name: string; kind: string }[] }
+export type Table = { schema: string; name: string; kind: string; columns: { name: string; type: string; nullable: boolean; default: string }[]; constraints: { name: string; type: string; definition: string }[]; indexes: { name: string; definition: string }[] }
+export type DataPage = { columns: string[]; rows: (string | null)[][]; page: number; page_size: number; has_next: boolean }
+export type Draft = { name: string; sql_up: string; sql_down: string; irreversible: boolean; irreversible_reason: string }
+export type Migration = Draft & { id: string; database_id: string; revision_id: string; version: number | null; dbms: string; status: string; created_at: string; created_by: string; error_message?: string; can_edit: boolean }
+export type ChangeInput = { migration_id: string; revision_id: string; action: string; target_execution_id?: string; mode: string; batch_size: number; cursor_column: string; scope: string }
+export type ChangeRequest = ChangeInput & { id: string; database_id: string; migration_name: string; status: string; approvals: { group_id: number; group_name: string; leader_id: number; leader_name: string; status: string; comment?: string }[]; validation: string[]; can_approve: boolean; can_submit: boolean; can_enqueue: boolean; sql: string }
+export type Execution = { id: string; migration_id: string; migration_name: string; revision_id: string; action: string; status: string; actor: string; at: string; sql: string; attempt: number; reverts_execution_id?: string; can_rollback: boolean; can_forward: boolean }
+export type Job = { id: string; database_id: string; request_id: string; migration_id: string; execution_id: string; status: string; committed_rows: number; committed_batches: number; total_rows: number | null; attempt: number; last_error?: string; can_resume: boolean; can_compensate: boolean; updated_at: string }
