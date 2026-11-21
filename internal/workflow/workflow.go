@@ -1,6 +1,3 @@
-// Package workflow memegang domain migration M2: definisi/revisi, pengajuan, approval leader,
-// history attempt, dan posisi aktif (rollback/forward linear). Eksekusi SQL dilakukan worker
-// lewat Queue; worker memakai Prepare/BeginAttempt/FinishAttempt.
 package workflow
 
 import (
@@ -24,7 +21,6 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
 )
 
-// Plan adalah execution plan immutable yang diserahkan ke queue/worker.
 type Plan struct {
 	RequestID         string
 	ConnectionID      uuid.UUID
@@ -40,8 +36,6 @@ type Plan struct {
 	ActorID           int64
 }
 
-// Queue dimiliki modul queue/worker. Enqueue wajib idempotent per RequestID dan dijalankan di
-// dalam tx platform yang sama dengan perubahan status pengajuan.
 type Queue interface {
 	Enqueue(ctx context.Context, tx pgx.Tx, plan Plan, idempotencyKey string) (contracts.Job, error)
 }
@@ -83,8 +77,6 @@ func parseUUID(s string) (uuid.UUID, error) {
 func (s *Service) canEdit(ctx context.Context, p reqctx.Principal, connID uuid.UUID) bool {
 	return s.Authz != nil && s.Authz.Can(ctx, p, connID, authz.MigrationExecute) == nil
 }
-
-// ---------- definisi dan revisi ----------
 
 func (s *Service) validateDraft(ctx context.Context, connID uuid.UUID, d *contracts.Draft) error {
 	d.Name = strings.TrimSpace(d.Name)
@@ -176,7 +168,6 @@ func (s *Service) Get(ctx context.Context, _ reqctx.Principal, connID uuid.UUID,
 	return scanMigration(s.DB.QueryRow(ctx, selectMigration+` WHERE m.connection_id = $1 AND m.id = $2`, connID, id))
 }
 
-// Save membuat definisi baru (mid kosong) atau menambah revisi pada definisi yang belum pernah dieksekusi.
 func (s *Service) Save(ctx context.Context, p reqctx.Principal, connID uuid.UUID, mid string, d contracts.Draft) (contracts.Migration, error) {
 	if err := s.validateDraft(ctx, connID, &d); err != nil {
 		return contracts.Migration{}, err
@@ -230,8 +221,6 @@ func saveRevision(ctx context.Context, tx pgx.Tx, p reqctx.Principal, connID uui
 	return id, err
 }
 
-// SaveGenerated menyimpan kandidat SQL up dari schema diff sebagai draft. Down/alasan irreversible
-// dilengkapi pengguna sebelum pengajuan; reverse DDL tidak dianggap memulihkan data.
 func (s *Service) SaveGenerated(ctx context.Context, p reqctx.Principal, connID uuid.UUID, name string, statements []string) ([]contracts.Migration, error) {
 	var ids []int64
 	err := pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
@@ -264,8 +253,6 @@ func (s *Service) SaveGenerated(ctx context.Context, p reqctx.Principal, connID 
 	}
 	return out, nil
 }
-
-// ---------- history dan posisi ----------
 
 type querier interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
@@ -336,13 +323,11 @@ func (s *Service) History(ctx context.Context, _ reqctx.Principal, connID uuid.U
 	return out, nil
 }
 
-// ---------- pengajuan dan approval ----------
-
 type request struct {
 	contracts.ChangeRequest
 	connID      uuid.UUID
 	migrationID int64
-	stored      string // status tersimpan: draft | pending_review | queued
+	stored      string
 	createdBy   int64
 	queuedBy    *int64
 	upSQL       string
@@ -376,8 +361,6 @@ func scanRequest(row pgx.Row) (request, error) {
 	return x, err
 }
 
-// approvals menghitung persetujuan terhadap leader *saat ini* dari setiap group yang punya grant
-// (view maupun edit). Pergantian leader/grant otomatis membuat approval lama tidak berlaku.
 func approvals(ctx context.Context, q querier, x request) ([]contracts.Approval, error) {
 	rows, err := q.Query(ctx, `
 		SELECT g.id, g.name, coalesce(u.id, 0), coalesce(u.username::text, ''),
@@ -399,7 +382,6 @@ func approvals(ctx context.Context, q querier, x request) ([]contracts.Approval,
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[contracts.Approval])
 }
 
-// evaluate mengisi status turunan, validasi, dan approval pengajuan.
 func evaluate(ctx context.Context, q querier, x *request) error {
 	list, err := approvals(ctx, q, *x)
 	if err != nil {
@@ -509,7 +491,6 @@ func (s *Service) Request(ctx context.Context, p reqctx.Principal, connID uuid.U
 	return x.ChangeRequest, err
 }
 
-// Propose membuat pengajuan apply/rollback/forward terhadap revisi yang ditentukan.
 func (s *Service) Propose(ctx context.Context, p reqctx.Principal, connID uuid.UUID, in contracts.ChangeInput) (contracts.ChangeRequest, error) {
 	mid, err := parseMigrationID(in.MigrationID)
 	if err != nil {
@@ -541,7 +522,6 @@ func (s *Service) Propose(ctx context.Context, p reqctx.Principal, connID uuid.U
 			if err != nil {
 				return migration.ValidationError("Rollback/forward memerlukan execution target.")
 			}
-			// Rollback/forward selalu memakai revisi execution target; down tidak bisa diganti.
 			var want string
 			err = tx.QueryRow(ctx, `SELECT revision_id::text FROM migration_executions WHERE id = $1 AND migration_id = $2 AND connection_id = $3`, t, mid, connID).Scan(&want)
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -587,7 +567,6 @@ func (s *Service) Submit(ctx context.Context, p reqctx.Principal, connID uuid.UU
 	return s.Request(ctx, p, connID, rid)
 }
 
-// Review mencatat keputusan leader untuk setiap group yang dipimpinnya. Leader View Only boleh approve.
 func (s *Service) Review(ctx context.Context, p reqctx.Principal, connID uuid.UUID, rid string, f contracts.Review) (contracts.ChangeRequest, error) {
 	err := pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
 		x, err := s.load(ctx, tx, p, connID, rid, true)
@@ -627,14 +606,12 @@ func plan(x request, actor int64) Plan {
 		CursorColumn: x.CursorColumn, Scope: x.Scope, SQL: x.SQL, ActorID: actor}
 }
 
-// Enqueue memeriksa ulang approval/validasi lalu menyerahkan plan ke queue dalam satu tx platform.
 func (s *Service) Enqueue(ctx context.Context, p reqctx.Principal, connID uuid.UUID, rid, key string) (contracts.Job, error) {
 	if s.Queue == nil {
 		return contracts.Job{}, &contracts.Error{Status: 503, Code: "module_unavailable", Message: "Layanan queue dan worker belum tersedia."}
 	}
 	var job contracts.Job
 	err := pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
-		// Kunci per database agar dua enqueue tidak lolos validasi posisi yang sama.
 		if _, err := tx.Exec(ctx, `SELECT 1 FROM db_connections WHERE id = $1 FOR UPDATE`, connID); err != nil {
 			return err
 		}
@@ -643,7 +620,7 @@ func (s *Service) Enqueue(ctx context.Context, p reqctx.Principal, connID uuid.U
 			return err
 		}
 		if x.stored == "queued" {
-			job, err = s.Queue.Enqueue(ctx, tx, plan(x, *x.queuedBy), key) // idempotent: kembalikan job yang sama
+			job, err = s.Queue.Enqueue(ctx, tx, plan(x, *x.queuedBy), key)
 			return err
 		}
 		if x.Status != "approved" {
@@ -661,10 +638,6 @@ func (s *Service) Enqueue(ctx context.Context, p reqctx.Principal, connID uuid.U
 	return job, err
 }
 
-// ---------- antarmuka worker ----------
-
-// Prepare memvalidasi ulang pengajuan tepat sebelum eksekusi: approval leader/grant terkini,
-// izin actor, revisi, dan posisi aktif. Dipanggil worker setelah memegang lock target.
 func (s *Service) Prepare(ctx context.Context, requestID string) (Plan, error) {
 	id, err := parseUUID(requestID)
 	if err != nil {
@@ -677,7 +650,6 @@ func (s *Service) Prepare(ctx context.Context, requestID string) (Plan, error) {
 	if x.stored != "queued" || x.queuedBy == nil {
 		return Plan{}, conflict("Pengajuan belum masuk queue.")
 	}
-	// Status tersimpan queued; evaluasi approval seakan masih pending_review.
 	x.stored = "pending_review"
 	if err := evaluate(ctx, s.DB, &x); err != nil {
 		return Plan{}, err
@@ -695,8 +667,6 @@ func (s *Service) Prepare(ctx context.Context, requestID string) (Plan, error) {
 	return plan(x, actor.UserID), nil
 }
 
-// BeginAttempt mencatat attempt baru (status running) beserta snapshot SQL yang dijalankan.
-// Retry memanggil BeginAttempt lagi dengan attempt berikutnya; catatan lama tidak ditimpa.
 func (s *Service) BeginAttempt(ctx context.Context, pl Plan, jobID string, attemptNo int) (string, error) {
 	var reverts *string
 	if pl.Action == "rollback" {
@@ -712,8 +682,6 @@ func (s *Service) BeginAttempt(ctx context.Context, pl Plan, jobID string, attem
 
 var finalStatus = map[string]bool{"success": true, "failed": true, "commit_unknown": true, "partial": true, "partially_reverted": true}
 
-// FinishAttempt menyimpan hasil attempt. Idempotent: mengulang hasil yang sama tidak error;
-// status final (success/failed) tidak bisa diubah (dijaga trigger DB).
 func (s *Service) FinishAttempt(ctx context.Context, executionID, status, errMsg string) error {
 	if !finalStatus[status] {
 		return fmt.Errorf("workflow: status attempt tidak dikenal: %q", status)

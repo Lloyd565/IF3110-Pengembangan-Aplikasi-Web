@@ -98,7 +98,6 @@ func validateConnection(ctx context.Context, db *pgxpool.Pool, connID uuid.UUID,
 	return name, sql, err
 }
 
-// CheckSQL memvalidasi satu SQL (up atau down) sesuai DBMS koneksinya.
 func CheckSQL(ctx context.Context, db *pgxpool.Pool, connID uuid.UUID, sql string) error {
 	_, _, err := validateConnection(ctx, db, connID, "-", sql)
 	return err

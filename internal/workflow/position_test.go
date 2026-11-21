@@ -29,7 +29,6 @@ func TestRollbackOnlyLastActiveAndLinearForward(t *testing.T) {
 		t.Fatal("rollback dengan execution target yang salah harus ditolak")
 	}
 
-	// Rollback C lalu B; forward harus B dulu, baru C.
 	rC := attempt{ID: "E4", MigrationID: C, Action: "rollback", Status: "success", Reverts: "E3"}
 	rB := attempt{ID: "E5", MigrationID: B, Action: "rollback", Status: "success", Reverts: "E2"}
 	p = replay(append(h, rC, rB))
@@ -43,7 +42,6 @@ func TestRollbackOnlyLastActiveAndLinearForward(t *testing.T) {
 		t.Fatalf("apply ulang migration yang di-rollback harus diarahkan ke forward, dapat %q", msg)
 	}
 
-	// Forward B tidak otomatis menjalankan C; C tetap menunggu forward-nya sendiri.
 	p = replay(append(h, rC, rB, attempt{ID: "E6", MigrationID: B, Action: "forward", Status: "success"}))
 	if top(p.active) != B || p.check("forward", C, "E4") != "" {
 		t.Fatalf("setelah forward B: active=%v undone=%v", p.active, p.undone)
@@ -73,7 +71,6 @@ func TestUnresolvedBlocksUntilReconciled(t *testing.T) {
 	if replay(h).check("apply", C, "") == "" {
 		t.Fatal("partial harus menahan migration lain")
 	}
-	// Attempt berikutnya untuk B yang sukses (resume) melepas penahanan.
 	h = append(h, ok(3, B, "apply"))
 	if msg := replay(h).check("apply", C, ""); msg != "" {
 		t.Fatalf("setelah rekonsiliasi: %s", msg)
@@ -81,7 +78,6 @@ func TestUnresolvedBlocksUntilReconciled(t *testing.T) {
 }
 
 func TestHideRollbackBySpecExample(t *testing.T) {
-	// Riwayat lengkap: A[E1], B[E2], B rollback E2 [E3], B forward [E4], C[E5], ditambah attempt gagal.
 	h := []attempt{
 		ok(1, A, "apply"),
 		ok(2, B, "apply"),

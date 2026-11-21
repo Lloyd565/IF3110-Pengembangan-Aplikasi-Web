@@ -97,7 +97,6 @@ func main() {
 		Authz:        &authz.Authorizer{DB: pool},
 		Conns:        conns,
 	}
-	// Queue diisi modul worker; selama nil, Enqueue membalas 503 module_unavailable.
 	srv.Workflow = &workflow.Service{DB: pool, Authz: srv.Authz}
 	srv.Leaders = &workflow.Leaders{DB: pool}
 	srv.Admin = &admin.Service{

@@ -1,6 +1,3 @@
--- Dataset uji migration besar (PostgreSQL target).
--- Pakai: psql -v rows=2000000 -f dataset.sql
--- Membuat ulang perf.accounts sehingga keadaan awal setiap pengujian sebanding.
 \set ON_ERROR_STOP on
 \if :{?rows}
 \else
@@ -10,7 +7,7 @@
 DROP SCHEMA IF EXISTS perf CASCADE;
 CREATE SCHEMA perf;
 CREATE TABLE perf.accounts (
-    id         bigint PRIMARY KEY,          -- cursor batch: unik dan tidak berubah
+    id         bigint PRIMARY KEY,
     balance    bigint      NOT NULL,
     tier       text        NOT NULL,
     updated_at timestamptz NOT NULL DEFAULT now()

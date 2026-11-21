@@ -1,11 +1,7 @@
--- Milestone 2: definisi/revisi, pengajuan, approval, history attempt, dan leader group.
--- Tabel migrations M1 tetap menjadi identitas definisi (id, connection, nama, version legacy).
-
 CREATE TABLE group_leaders (
     group_id   bigint PRIMARY KEY,
     user_id    bigint      NOT NULL,
     updated_at timestamptz NOT NULL DEFAULT now(),
-    -- Leader wajib anggota group; dikeluarkan dari group = otomatis bukan leader.
     FOREIGN KEY (group_id, user_id) REFERENCES group_members (group_id, user_id) ON DELETE CASCADE
 );
 
@@ -83,7 +79,6 @@ CREATE TABLE migration_approvals (
     PRIMARY KEY (request_id, group_id, leader_id)
 );
 
--- Revisi immutable: perubahan SQL selalu menjadi revisi baru.
 CREATE FUNCTION migration_revisions_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     RAISE EXCEPTION 'revisi migration bersifat immutable' USING ERRCODE = 'restrict_violation';
@@ -91,7 +86,6 @@ END $$;
 CREATE TRIGGER migration_revisions_immutable BEFORE UPDATE OR DELETE ON migration_revisions
     FOR EACH ROW EXECUTE FUNCTION migration_revisions_immutable();
 
--- History append-only: identitas/snapshot SQL tidak pernah berubah; status final (success/failed) dibekukan.
 CREATE FUNCTION migration_executions_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP = 'DELETE' OR OLD.status IN ('success','failed')
@@ -108,16 +102,12 @@ END $$;
 CREATE TRIGGER migration_executions_guard BEFORE UPDATE OR DELETE ON migration_executions
     FOR EACH ROW EXECUTE FUNCTION migration_executions_guard();
 
--- Backfill M1: setiap migration lama menjadi revisi 1 irreversible berlabel legacy.
--- Rumus digest sama dengan workflow.digest (pemisah chr(31)).
 INSERT INTO migration_revisions (migration_id, number, sql_up, irreversible, irreversible_reason, digest, legacy, created_by, created_at)
 SELECT id, 1, sql, true, 'Legacy M1: SQL down tidak tersedia.',
        encode(sha256(convert_to(sql || chr(31) || '' || chr(31) || 'true' || chr(31) || 'Legacy M1: SQL down tidak tersedia.', 'UTF8')), 'hex'),
        true, created_by, created_at
 FROM migrations;
 
--- Eksekusi M1 yang sudah final menjadi history apply, berurutan sesuai version lama.
--- ponytail: migration M1 berstatus running saat upgrade tidak di-backfill; hentikan server dengan bersih sebelum upgrade.
 INSERT INTO migration_executions (connection_id, migration_id, revision_id, action, status, sql, actor_id,
                                   error_message, legacy, started_at, finished_at)
 SELECT m.connection_id, m.id, r.id, 'apply', m.status, m.sql, coalesce(m.executed_by, m.created_by),

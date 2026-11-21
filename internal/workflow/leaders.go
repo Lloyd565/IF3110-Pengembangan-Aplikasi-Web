@@ -14,7 +14,6 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
 )
 
-// Leaders menyimpan satu leader per group. Otorisasi admin dilakukan oleh router.
 type Leaders struct{ DB *pgxpool.Pool }
 
 var _ contracts.Leaders = (*Leaders)(nil)
@@ -29,8 +28,6 @@ func (l *Leaders) List(ctx context.Context, _ reqctx.Principal) ([]contracts.Lea
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[contracts.Leader])
 }
 
-// Set menetapkan leader. Leader wajib anggota aktif group (FK ke group_members).
-// Approval lama milik leader sebelumnya otomatis tidak dihitung lagi.
 func (l *Leaders) Set(ctx context.Context, p reqctx.Principal, groupID, userID int64) error {
 	var active bool
 	err := l.DB.QueryRow(ctx, `SELECT is_active FROM users WHERE id = $1`, userID).Scan(&active)

@@ -19,10 +19,10 @@ import (
 
 var (
 	conn  = uuid.MustParse("aaaaaaaa-0000-0000-0000-000000000001")
-	alice = reqctx.Principal{UserID: 1, Username: "alice"} // edit, leader group app
-	bob   = reqctx.Principal{UserID: 2, Username: "bob"}   // view only, leader group ro
-	carol = reqctx.Principal{UserID: 3, Username: "carol"} // edit, anggota app
-	dave  = reqctx.Principal{UserID: 4, Username: "dave"}  // tanpa akses
+	alice = reqctx.Principal{UserID: 1, Username: "alice"}
+	bob   = reqctx.Principal{UserID: 2, Username: "bob"}
+	carol = reqctx.Principal{UserID: 3, Username: "carol"}
+	dave  = reqctx.Principal{UserID: 4, Username: "dave"}
 )
 
 type fakeQueue struct{ plans []Plan }
@@ -78,7 +78,6 @@ func must[T any](t *testing.T) func(T, error) T {
 	}
 }
 
-// approveAll membuat, mengirim, dan menyetujui pengajuan oleh semua leader.
 func approveAll(t *testing.T, s *Service, in contracts.ChangeInput, leaders ...reqctx.Principal) contracts.ChangeRequest {
 	t.Helper()
 	ctx := context.Background()
@@ -90,7 +89,6 @@ func approveAll(t *testing.T, s *Service, in contracts.ChangeInput, leaders ...r
 	return x
 }
 
-// run mensimulasikan worker: Prepare, lalu satu attempt per status hasil.
 func run(t *testing.T, s *Service, rid string, results ...string) []string {
 	t.Helper()
 	ctx := context.Background()
@@ -144,7 +142,6 @@ func TestWorkflowIntegration(t *testing.T) {
 	if _, err := s.Enqueue(ctx, alice, conn, x.ID, "key-12345"); status(t, err) != 409 {
 		t.Fatal("enqueue sebelum seluruh approval harus 409")
 	}
-	// Leader View Only boleh approve.
 	x = must[contracts.ChangeRequest](t)(s.Review(ctx, bob, conn, x.ID, contracts.Review{Decision: "approve"}))
 	if x.Status != "approved" {
 		t.Fatalf("setelah semua leader = %s", x.Status)
@@ -176,7 +173,6 @@ func TestWorkflowIntegration(t *testing.T) {
 		t.Fatalf("enqueue idempotent: %+v %+v plans=%d", job, again, len(q.plans))
 	}
 
-	// Attempt 1 gagal, retry sukses: keduanya tercatat.
 	ids := run(t, s, x.ID, "failed", "success")
 
 	t.Run("definisi yang pernah dieksekusi immutable", func(t *testing.T) {
@@ -195,7 +191,6 @@ func TestWorkflowIntegration(t *testing.T) {
 		}
 	})
 
-	// Rollback memakai down asli dan merujuk execution yang dibatalkan.
 	rb := approveAll(t, s, contracts.ChangeInput{MigrationID: m.ID, RevisionID: m.RevisionID, Action: "rollback", TargetExecutionID: ids[1]}, carol, bob)
 	if rb.SQL != "DROP TABLE t" || rb.Status != "approved" {
 		t.Fatalf("rollback = %+v", rb)
@@ -212,7 +207,6 @@ func TestWorkflowIntegration(t *testing.T) {
 		t.Fatalf("hide rollback harus menyisakan attempt gagal saja: %+v", hidden)
 	}
 
-	// Forward menjalankan up revisi yang sama; tidak bisa mengganti SQL.
 	fw := approveAll(t, s, contracts.ChangeInput{MigrationID: m.ID, RevisionID: m.RevisionID, Action: "forward", TargetExecutionID: rbIDs[0]}, carol, bob)
 	if fw.SQL != "CREATE TABLE t (id bigint)" {
 		t.Fatalf("forward SQL = %q", fw.SQL)
@@ -270,7 +264,6 @@ func TestLegacyBackfill(t *testing.T) {
 	if err := platformdb.Migrate(ctx, db); err != nil {
 		t.Fatal(err)
 	}
-	// Kembalikan ke schema M1, isi data lama, lalu jalankan upgrade lagi.
 	if _, err := db.Exec(ctx, `
 		DROP TABLE migration_approvals, migration_requests, migration_executions, migration_revisions, group_leaders CASCADE;
 		DROP FUNCTION migration_revisions_immutable, migration_executions_guard;
@@ -305,7 +298,6 @@ func TestLegacyBackfill(t *testing.T) {
 	if len(h) != 2 || h[0].MigrationName != "v1" || h[0].Status != "success" || h[1].Status != "failed" || h[0].SQL != "CREATE TABLE a (id int)" {
 		t.Fatalf("history legacy = %+v", h)
 	}
-	// Digest backfill memakai rumus yang sama dengan Go.
 	var dbDigest string
 	if err := db.QueryRow(ctx, `SELECT digest FROM migration_revisions WHERE migration_id = 1`).Scan(&dbDigest); err != nil {
 		t.Fatal(err)

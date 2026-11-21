@@ -1,11 +1,3 @@
-// Stress test k6: akses API dan job migration ber-approval secara bersamaan.
-//
-//   k6 run -e BASE_URL=http://localhost:8080 -e USERNAME=perf -e PASSWORD=... \
-//          -e DB_SAME=<uuid> -e DB_OTHER=<uuid> tests/performance/stress.js
-//
-// USERNAME harus punya grant edit ke DB_SAME/DB_OTHER dan menjadi leader dari setiap group
-// yang punya grant ke database tersebut (agar approval sah tanpa bypass). Kedua database berisi
-// tabel perf.accounts dari dataset.sql.
 import http from 'k6/http'
 import { check, fail, sleep } from 'k6'
 import { Counter, Rate, Trend } from 'k6/metrics'
@@ -14,17 +6,16 @@ const BASE = __ENV.BASE_URL || 'http://localhost:8080'
 const DBS = [__ENV.DB_SAME, __ENV.DB_OTHER || __ENV.DB_SAME]
 const TERMINAL = ['success', 'succeeded', 'failed', 'cancelled', 'partial', 'partially_reverted', 'commit_unknown', 'unknown']
 
-const jobDuration = new Trend('job_duration_ms', true) // enqueue -> status terminal
-const queueWait = new Trend('job_queue_wait_ms', true) // enqueue -> worker mulai (resolusi = interval polling)
-const jobsDone = new Counter('jobs_completed')         // rate = throughput penyelesaian job
+const jobDuration = new Trend('job_duration_ms', true)
+const queueWait = new Trend('job_queue_wait_ms', true)
+const jobsDone = new Counter('jobs_completed')
 const jobSuccess = new Rate('job_success')
 
-// Beban normal tim: 10 VU baca + 2 VU job. Tahap naik melampaui normal lalu turun (pemulihan).
 const levels = [
-  { duration: '1m', target: 10 },  // normal
-  { duration: '1m', target: 30 },  // 3x normal
-  { duration: '1m', target: 60 },  // 6x normal
-  { duration: '1m', target: 10 },  // turun: pemulihan
+  { duration: '1m', target: 10 },
+  { duration: '1m', target: 30 },
+  { duration: '1m', target: 60 },
+  { duration: '1m', target: 10 },
   { duration: '30s', target: 0 },
 ]
 export const options = {
@@ -77,7 +68,7 @@ export function api(s) {
 
 export function jobs(s) {
   session(s)
-  const db = DBS[(__VU + __ITER) % DBS.length] // bergantian: database sama dan berbeda
+  const db = DBS[(__VU + __ITER) % DBS.length]
   const base = `${BASE}/api/db/${db}`
   const slice = (__VU * 1000 + __ITER) % 20
   const m = data(http.post(`${base}/migrations`, JSON.stringify({
@@ -94,7 +85,6 @@ export function jobs(s) {
   const enqueuedAt = Date.now()
   const job = data(http.post(`${base}/requests/${req.id}/enqueue`, '{}', headers(s.csrf, { 'Idempotency-Key': `k6-${req.id}` })), 'enqueue')
   if (!job) return
-  // Respons 202 bukan keberhasilan migration: pantau sampai status terminal.
   let started = false
   for (let i = 0; i < 600; i++) {
     const cur = data(http.get(`${base}/jobs/${job.id}`, { tags: { name: 'job_poll' } }), 'poll')

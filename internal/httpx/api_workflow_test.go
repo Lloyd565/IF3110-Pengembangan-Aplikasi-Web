@@ -141,7 +141,6 @@ func TestIntegrationWorkflowAPI(t *testing.T) {
 	if code, _ = bob.do("POST", base+"/requests/"+req.ID+"/enqueue", map[string]any{}, "Idempotency-Key", "key-123456"); code != 403 {
 		t.Fatalf("View Only enqueue: %d", code)
 	}
-	// Tanpa modul queue, enqueue gagal tertutup (tidak menjalankan SQL langsung).
 	if code, raw = alice.do("POST", base+"/requests/"+req.ID+"/enqueue", map[string]any{}, "Idempotency-Key", "key-123456"); code != 503 {
 		t.Fatalf("enqueue tanpa queue: %d %s", code, raw)
 	}

@@ -5,29 +5,22 @@ import (
 	"slices"
 )
 
-// attempt adalah satu baris history yang relevan untuk menghitung posisi aktif.
 type attempt struct {
 	ID          string
 	MigrationID int64
-	Action      string // apply | rollback | forward
+	Action      string
 	Status      string
-	Reverts     string // execution ID yang dibatalkan (rollback)
+	Reverts     string
 }
 
-// unresolved menahan seluruh perubahan lain di database sampai direkonsiliasi.
 var unresolved = map[string]bool{"commit_unknown": true, "partial": true, "partially_reverted": true}
 
-// position adalah hasil replay history sukses secara berurutan.
-//
-//	apply X    : push X ke active, kosongkan undone (cabang linear baru)
-//	rollback X : X harus puncak active; pindah ke undone
-//	forward X  : X harus puncak undone; kembali ke active
 type position struct {
 	active  []int64
 	undone  []int64
-	applied map[int64]string // migration -> execution yang membuatnya aktif
-	rolled  map[int64]string // migration -> rollback sukses yang membatalkannya
-	blocked string           // alasan penahanan, kosong jika tidak ada
+	applied map[int64]string
+	rolled  map[int64]string
+	blocked string
 }
 
 func replay(history []attempt) position {
@@ -80,8 +73,6 @@ func top(stack []int64) int64 {
 	return stack[len(stack)-1]
 }
 
-// check memvalidasi apakah aksi boleh diajukan/dijalankan pada posisi saat ini.
-// target adalah execution ID untuk rollback (execution yang dibatalkan) atau forward (rollback yang dibalik).
 func (p position) check(action string, migrationID int64, target string) string {
 	if p.blocked != "" {
 		return p.blocked
@@ -114,8 +105,6 @@ func (p position) check(action string, migrationID int64, target string) string 
 	return ""
 }
 
-// hideRollback menyembunyikan pasangan (execution yang dibatalkan, rollback suksesnya) berdasarkan ID.
-// Attempt gagal dan forward tetap terlihat.
 func hideRollback[T any](list []T, get func(T) attempt) []T {
 	hidden := map[string]bool{}
 	for _, x := range list {
