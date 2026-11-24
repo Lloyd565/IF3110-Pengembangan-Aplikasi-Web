@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -11,8 +12,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/contracts"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/platformdb"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/testdb"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/workflow"
 )
 
 var (
@@ -37,7 +40,7 @@ func newDB(t *testing.T) *pgxpool.Pool {
 func enqueue(t *testing.T, db *pgxpool.Pool, conn uuid.UUID, key string) int64 {
 	t.Helper()
 	id, _, err := Enqueue(context.Background(), db, NewJob{
-		ConnectionID: conn, RequestID: 1, ExecutionID: 1, IdempotencyKey: key, Operation: "apply", SQL: "SELECT 1",
+		ConnectionID: conn, RequestID: uuid.New(), Key: key, Plan: json.RawMessage(`{}`),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +51,7 @@ func enqueue(t *testing.T, db *pgxpool.Pool, conn uuid.UUID, key string) int64 {
 func TestEnqueueIdempotent(t *testing.T) {
 	db := newDB(t)
 	ctx := context.Background()
-	in := NewJob{ConnectionID: connA, RequestID: 7, ExecutionID: 9, IdempotencyKey: "k1", Operation: "apply", SQL: "SELECT 1"}
+	in := NewJob{ConnectionID: connA, RequestID: uuid.New(), Key: "k1", Plan: json.RawMessage(`{}`)}
 	first, created, err := Enqueue(ctx, db, in)
 	if err != nil || !created {
 		t.Fatalf("enqueue pertama: id=%d created=%v err=%v", first, created, err)
@@ -61,6 +64,24 @@ func TestEnqueueIdempotent(t *testing.T) {
 	db.QueryRow(ctx, `SELECT count(*) FROM jobs`).Scan(&n)
 	if n != 1 {
 		t.Errorf("jumlah job = %d, mau 1", n)
+	}
+}
+
+func TestResumeSharesRootWithParent(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	root := enqueue(t, db, connA, "root")
+	child, _, err := Enqueue(ctx, db, NewJob{ConnectionID: connA, RequestID: uuid.New(), Key: "child", Kind: KindResume,
+		ParentJobID: &root, Plan: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, _ := Get(ctx, db, child)
+	if j.RootID != root || j.Kind != KindResume {
+		t.Errorf("root=%d kind=%s, mau root=%d kind=resume", j.RootID, j.Kind, root)
+	}
+	if r, _ := Get(ctx, db, root); r.RootID != root {
+		t.Errorf("job utama harus menjadi root dirinya sendiri, root=%d", r.RootID)
 	}
 }
 
@@ -138,7 +159,8 @@ func TestLeaseExpiryFencesOldWorker(t *testing.T) {
 	for name, err := range map[string]error{
 		"heartbeat": Heartbeat(ctx, db, id, "lama", time.Minute),
 		"succeed":   Succeed(ctx, db, id, "lama"),
-		"progress":  SetProgress(ctx, db, id, "lama", 1, 1, HoldNone),
+		"progress":  SetProgress(ctx, db, id, "lama", 1, 1, nil, HoldNone),
+		"execution": SetExecution(ctx, db, id, "lama", uuid.NewString(), 2),
 	} {
 		if !errors.Is(err, ErrLeaseLost) {
 			t.Errorf("%s oleh worker lama harus ErrLeaseLost, dapat %v", name, err)
@@ -152,8 +174,8 @@ func TestLeaseExpiryFencesOldWorker(t *testing.T) {
 func TestRetryBackoffAndExhaustion(t *testing.T) {
 	db := newDB(t)
 	ctx := context.Background()
-	id, _, err := Enqueue(ctx, db, NewJob{ConnectionID: connA, RequestID: 1, ExecutionID: 1, IdempotencyKey: "k",
-		Operation: "apply", SQL: "SELECT 1", MaxRetries: 1})
+	id, _, err := Enqueue(ctx, db, NewJob{ConnectionID: connA, RequestID: uuid.New(), Key: "k",
+		Plan: json.RawMessage(`{}`), MaxRetries: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,5 +199,68 @@ func TestRetryBackoffAndExhaustion(t *testing.T) {
 	got, _ := Get(ctx, db, id)
 	if got.Status != StatusFailed || got.Error != "gagal lagi" {
 		t.Errorf("status akhir = %s (%s), mau failed", got.Status, got.Error)
+	}
+}
+
+func TestQueueEnqueueOncePerRequest(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	req := uuid.New()
+	plan := workflow.Plan{RequestID: req.String(), ConnectionID: connA, MigrationID: "7", Action: "apply", Mode: "normal", SQL: "SELECT 1"}
+	enq := func(p workflow.Plan, key string) (contracts.Job, error) {
+		tx, err := db.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		j, err := Queue{}.Enqueue(ctx, tx, p, key)
+		if err == nil {
+			err = tx.Commit(ctx)
+		}
+		return j, err
+	}
+	first, err := enq(plan, "k1")
+	if err != nil || first.Status != "queued" || first.MigrationID != "7" {
+		t.Fatalf("enqueue pertama: %+v err=%v", first, err)
+	}
+	// kunci berbeda untuk pengajuan yang sama tidak boleh membuat job kedua.
+	again, err := enq(plan, "k2")
+	if err != nil || again.ID != first.ID {
+		t.Fatalf("pengajuan sama harus mengembalikan job yang sama: %+v err=%v", again, err)
+	}
+	// kunci yang sama untuk pengajuan lain adalah konflik.
+	other := plan
+	other.RequestID = uuid.NewString()
+	_, err = enq(other, "k1")
+	var ce *contracts.Error
+	if !errors.As(err, &ce) || ce.Status != 409 {
+		t.Fatalf("idempotency key bentrok harus 409, dapat %v", err)
+	}
+	var n int
+	db.QueryRow(ctx, `SELECT count(*) FROM jobs`).Scan(&n)
+	if n != 1 {
+		t.Errorf("jumlah job = %d, mau 1", n)
+	}
+}
+
+func TestPublicStatusMapping(t *testing.T) {
+	cases := []struct {
+		status, hold, want string
+		resume, compensate bool
+	}{
+		{StatusQueued, HoldNone, "queued", false, false},
+		{StatusRetryWait, HoldNone, "queued", false, false},
+		{StatusSucceeded, HoldNone, "success", false, false},
+		{StatusFailed, HoldNone, "failed", false, false},
+		{StatusFailed, HoldPartial, "partial", true, true},
+		{StatusFailed, HoldPartiallyReverted, "partially_reverted", false, true},
+		{StatusFailed, HoldCommitUnknown, "commit_unknown", true, false},
+	}
+	for _, c := range cases {
+		out := Public(&Job{Status: c.status, Hold: c.hold, Plan: json.RawMessage(`{}`)})
+		if out.Status != c.want || out.CanResume != c.resume || out.CanCompensate != c.compensate {
+			t.Errorf("%s/%s: status=%s resume=%v compensate=%v, mau %s %v %v", c.status, c.hold,
+				out.Status, out.CanResume, out.CanCompensate, c.want, c.resume, c.compensate)
+		}
 	}
 }
