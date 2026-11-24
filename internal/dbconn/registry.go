@@ -14,6 +14,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/telemetry"
 )
 
 var ErrUnknownConnection = errors.New("dbconn: koneksi tidak terdaftar")
@@ -55,6 +57,7 @@ func Connect(ctx context.Context, p Params) (*pgxpool.Pool, error) {
 		return nil, errors.New("dbconn: parameter koneksi tidak valid")
 	}
 	cfg.MaxConns = 4
+	telemetry.Install(cfg) // seluruh SQL ke target (termasuk read-only explorer) tercatat sebagai log dan span
 	cfg.ConnConfig.ConnectTimeout = 5 * time.Second
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
