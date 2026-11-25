@@ -21,6 +21,9 @@ type position struct {
 	applied map[int64]string
 	rolled  map[int64]string
 	blocked string
+	// blockedID/blockedStatus: execution yang menahan database. Rollback yang menargetkan execution
+	// partial ini adalah kompensasi untuk memulihkannya, jadi tidak ikut ditahan.
+	blockedID, blockedStatus string
 }
 
 func replay(history []attempt) position {
@@ -51,6 +54,7 @@ func replay(history []attempt) position {
 	for _, a := range history {
 		if l := latest[a.MigrationID]; l.ID == a.ID && unresolved[a.Status] {
 			p.blocked = fmt.Sprintf("Execution %s berstatus %s; rekonsiliasi dulu sebelum perubahan lain dijalankan.", a.ID, a.Status)
+			p.blockedID, p.blockedStatus = a.ID, a.Status
 		}
 	}
 	return p
@@ -74,6 +78,9 @@ func top(stack []int64) int64 {
 }
 
 func (p position) check(action string, migrationID int64, target string) string {
+	if action == "rollback" && p.blockedID != "" && p.blockedID == target && (p.blockedStatus == "partial" || p.blockedStatus == "partially_reverted") {
+		return ""
+	}
 	if p.blocked != "" {
 		return p.blocked
 	}

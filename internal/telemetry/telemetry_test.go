@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
@@ -149,6 +150,45 @@ func TestPgxTracerLogsEverySQLWithRedaction(t *testing.T) {
 	}
 	if !gotOK || !gotErr {
 		t.Errorf("setiap query harus menjadi span db.query, dan kegagalan menandai error (span=%v err=%v)", gotOK, gotErr)
+	}
+}
+
+func TestRedactErrorMasksInputValuesOnlyInDataErrors(t *testing.T) {
+	data := &pgconn.PgError{Code: "22P02", Message: `invalid input syntax for type integer: "rahasia123"`}
+	if got := RedactError(data); strings.Contains(got, "rahasia123") || !strings.Contains(got, "invalid input syntax") {
+		t.Errorf("nilai input harus disamarkan, pesan tetap terbaca: %q", got)
+	}
+	other := &pgconn.PgError{Code: "42P01", Message: `relation "tidak_ada" does not exist`}
+	if got := RedactError(other); !strings.Contains(got, "tidak_ada") {
+		t.Errorf("error non-data harus utuh agar mudah ditelusuri: %q", got)
+	}
+	if RedactError(nil) != "" {
+		t.Error("nil harus menghasilkan string kosong")
+	}
+}
+
+func TestTracerDoesNotLeakInputValuesThroughErrorsInLogsOrSpans(t *testing.T) {
+	pool := tracedPool(t)
+	sr := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr)))
+	buf := capture(t)
+	if _, err := pool.Exec(context.Background(), `SELECT 'rahasia123'::int`); err == nil {
+		t.Fatal("harus gagal")
+	}
+	if strings.Contains(buf.String(), "rahasia123") {
+		t.Fatalf("log tidak boleh memuat nilai input dari pesan error:\n%s", buf.String())
+	}
+	for _, sp := range sr.Ended() {
+		if strings.Contains(sp.Status().Description, "rahasia123") {
+			t.Errorf("status span memuat nilai input: %q", sp.Status().Description)
+		}
+		for _, ev := range sp.Events() {
+			for _, a := range ev.Attributes {
+				if strings.Contains(a.Value.Emit(), "rahasia123") {
+					t.Errorf("event span memuat nilai input: %s=%s", a.Key, a.Value.Emit())
+				}
+			}
+		}
 	}
 }
 

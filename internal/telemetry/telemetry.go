@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -151,6 +152,22 @@ func validTag(s string) bool {
 	return true
 }
 
+var quoted = regexp.MustCompile(`"[^"]*"|'[^']*'`)
+
+// RedactError menyamarkan nilai yang ikut tertulis di pesan error server. Error data (SQLSTATE kelas 22)
+// memuat nilai input apa adanya, mis. `invalid input syntax for type integer: "rahasia"`, sehingga isi
+// kutipannya disamarkan; error lain (relation "x" does not exist) tetap utuh agar mudah ditelusuri.
+func RedactError(err error) string {
+	if err == nil {
+		return ""
+	}
+	var pg *pgconn.PgError
+	if errors.As(err, &pg) && strings.HasPrefix(pg.Code, "22") {
+		return quoted.ReplaceAllString(err.Error(), `"?"`)
+	}
+	return err.Error()
+}
+
 // RedactArgs: angka, boolean, dan waktu boleh tampil; teks dan biner disamarkan.
 func RedactArgs(args []any) []string {
 	out := make([]string, len(args))
@@ -219,7 +236,7 @@ func (PgxTracer) TraceQueryEnd(ctx context.Context, conn *pgx.Conn, d pgx.TraceQ
 	}
 	if d.Err != nil {
 		status, level = "error", slog.LevelWarn
-		attrs = append(attrs, slog.String("error", d.Err.Error()))
+		attrs = append(attrs, slog.String("error", RedactError(d.Err)))
 		var pg *pgconn.PgError
 		if errors.As(d.Err, &pg) {
 			attrs = append(attrs, slog.String("sqlstate", pg.Code))
@@ -229,8 +246,8 @@ func (PgxTracer) TraceQueryEnd(ctx context.Context, conn *pgx.Conn, d pgx.TraceQ
 	slog.Default().LogAttrs(ctx, level, "sql.result", attrs...)
 	if span != nil {
 		if d.Err != nil {
-			span.RecordError(d.Err)
-			span.SetStatus(codes.Error, d.Err.Error())
+			span.RecordError(errors.New(RedactError(d.Err)))
+			span.SetStatus(codes.Error, RedactError(d.Err))
 		}
 		span.End()
 	}

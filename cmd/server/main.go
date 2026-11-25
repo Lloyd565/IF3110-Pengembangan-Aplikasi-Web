@@ -21,6 +21,8 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/config"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/httpx"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/jobs"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/telemetry"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/migration"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/observability"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/platformdb"
@@ -45,7 +47,11 @@ func main() {
 		log.Fatal(err)
 	}
 
-	pool, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
+	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		log.Fatal("PLATFORM_DATABASE_URL tidak valid")
+	}
+	pool, err := pgxpool.NewWithConfig(context.Background(), telemetry.Install(poolCfg)) // semua SQL platform tercatat
 	if err != nil {
 		log.Fatal("PLATFORM_DATABASE_URL tidak valid")
 	}
@@ -97,7 +103,8 @@ func main() {
 		Authz:        &authz.Authorizer{DB: pool},
 		Conns:        conns,
 	}
-	srv.Workflow = &workflow.Service{DB: pool, Authz: srv.Authz}
+	srv.Workflow = &workflow.Service{DB: pool, Authz: srv.Authz, Queue: jobs.Queue{}}
+	srv.Jobs = &jobs.Service{DB: pool, Authz: srv.Authz, Flow: srv.Workflow}
 	srv.Leaders = &workflow.Leaders{DB: pool}
 	srv.Admin = &admin.Service{
 		LogOnly: true,
