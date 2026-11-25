@@ -8,12 +8,14 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/auth"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/telemetry"
 )
 
 type sessionContextKey struct{}
@@ -76,6 +78,9 @@ func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 			if err == nil {
 				s.setSessionCookie(w, r, result)
 				ctx := reqctx.WithPrincipal(r.Context(), result.Session.Principal)
+				info := telemetry.From(ctx)
+				info.Actor = strconv.FormatInt(result.Session.Principal.UserID, 10)
+				ctx = telemetry.With(ctx, info)
 				ctx = reqctx.WithCSRFToken(ctx, result.Session.CSRFToken)
 				ctx = context.WithValue(ctx, sessionContextKey{}, result.Session)
 				r = r.WithContext(ctx)

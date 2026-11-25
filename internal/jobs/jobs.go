@@ -118,18 +118,27 @@ func Enqueue(ctx context.Context, q Querier, in NewJob) (id int64, created bool,
 		in.MaxRetries = 3
 	}
 	var root *int64
+	var batches, rows int64
+	var total *int64
+	hold := HoldNone
 	if in.ParentJobID != nil {
-		if err := q.QueryRow(ctx, `SELECT root_job_id FROM jobs WHERE id = $1`, *in.ParentJobID).Scan(&root); err != nil {
+		parent, err := Get(ctx, q, *in.ParentJobID)
+		if err != nil {
 			return 0, false, err
+		}
+		root = &parent.RootID
+		if in.Kind == KindResume {
+			batches, rows, total, hold = parent.CommittedBatches, parent.CommittedRows, parent.TotalRows, parent.Hold
 		}
 	}
 	err = q.QueryRow(ctx, `
 		WITH n AS (SELECT nextval(pg_get_serial_sequence('jobs', 'id')) AS id)
 		INSERT INTO jobs (id, connection_id, request_id, idempotency_key, kind, parent_job_id, root_job_id, plan,
-		                  max_retries, trace_context)
-		SELECT n.id, $1, $2, $3, $4, $5, coalesce($6::bigint, n.id), $7, $8, $9 FROM n
+		                  max_retries, trace_context, committed_batches, committed_rows, total_rows, hold)
+		SELECT n.id, $1, $2, $3, $4, $5, coalesce($6::bigint, n.id), $7, $8, $9, $10, $11, $12, $13 FROM n
 		ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`,
-		in.ConnectionID, in.RequestID, in.Key, in.Kind, in.ParentJobID, root, in.Plan, in.MaxRetries, in.TraceCtx).Scan(&id)
+		in.ConnectionID, in.RequestID, in.Key, in.Kind, in.ParentJobID, root, in.Plan, in.MaxRetries, in.TraceCtx,
+		batches, rows, total, hold).Scan(&id)
 	if err == nil {
 		return id, true, nil
 	}
@@ -193,8 +202,8 @@ func Claim(ctx context.Context, db *pgxpool.Pool, workerID string, lease time.Du
 		return nil, nil
 	}
 	j, err := scan(tx.QueryRow(ctx, `
-		UPDATE jobs SET status = 'running', worker_id = $2, lease_until = now() + $3::interval,
-			started_at = coalesce(started_at, now()), updated_at = now(),
+		UPDATE jobs SET status = 'running', worker_id = $2, lease_until = clock_timestamp() + $3::interval,
+			started_at = coalesce(started_at, clock_timestamp()), updated_at = clock_timestamp(),
 			retry_count = retry_count + (CASE WHEN status = 'running' THEN 1 ELSE 0 END)
 		WHERE id = $1 RETURNING `+cols, id, workerID, lease.String()))
 	if err != nil {

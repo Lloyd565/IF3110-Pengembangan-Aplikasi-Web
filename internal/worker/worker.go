@@ -39,6 +39,10 @@ type Recoverer interface {
 	PrepareRecovery(ctx context.Context, requestID string) (workflow.Plan, error)
 }
 
+type Revalidator interface {
+	Revalidate(ctx context.Context, requestID string, recovery bool) error
+}
+
 type Targets interface {
 	Target(ctx context.Context, id uuid.UUID) (*dbconn.Target, error)
 }
@@ -127,6 +131,8 @@ func classify(err error) result {
 		return unknown
 	case errors.Is(err, batch.ErrUnsafe), errors.Is(err, batch.ErrInvalidSpec):
 		return permanent
+	case isRevalidationRejection(err):
+		return permanent
 	case batch.IsTransient(err):
 		return transient
 	case batch.IsDefinite(err):
@@ -178,7 +184,7 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 	// attempt yang ditinggal worker sebelumnya (mati sebelum mencatat hasil) ditutup lebih dulu.
 	if j.AttemptOpen && j.ExecutionID != "" {
 		if err := w.Flow.FinishAttempt(ctx, j.ExecutionID, "failed", "Worker sebelumnya berhenti sebelum mencatat hasil attempt."); err != nil {
-			w.retry(ctx, j, jobs.HoldNone, err, &lost)
+			w.retry(ctx, j, j.Hold, err, &lost)
 			return
 		}
 		if err := jobs.CloseAttempt(ctx, w.DB, j.ID, w.ID); err != nil {
@@ -192,7 +198,7 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 			w.reject(ctx, j, snap, err, &lost)
 			return
 		}
-		w.retry(ctx, j, jobs.HoldNone, err, &lost)
+		w.retry(ctx, j, j.Hold, err, &lost)
 		return
 	}
 	info.Op, info.MigrationID, info.Actor = plan.Action, plan.MigrationID, strconv.FormatInt(plan.ActorID, 10)
@@ -200,7 +206,7 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 	attemptNo := j.Attempt + 1
 	exec, err := w.Flow.BeginAttempt(ctx, plan, strconv.FormatInt(j.ID, 10), attemptNo)
 	if err != nil {
-		w.retry(ctx, j, jobs.HoldNone, err, &lost)
+		w.retry(ctx, j, j.Hold, err, &lost)
 		return
 	}
 	if err := jobs.SetExecution(ctx, w.DB, j.ID, w.ID, exec, attemptNo); err != nil {
@@ -261,6 +267,11 @@ func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, l
 		return prog, fmt.Errorf("%w: worker M2 hanya mendukung target PostgreSQL", batch.ErrInvalidSpec)
 	}
 	r := &batch.Runner{Pool: tgt.Postgres, LockWait: w.LockWait, StatementTimeout: w.StatementTimeout, Hooks: w.Hooks, ReconcileWait: w.ReconcileWait}
+	if f, ok := w.Flow.(Revalidator); ok {
+		r.Revalidate = func(ctx context.Context) error {
+			return f.Revalidate(ctx, j.RequestID.String(), j.Kind != jobs.KindRun || j.Hold != jobs.HoldNone)
+		}
+	}
 	if w.Metrics != nil {
 		r.Metrics = w.Metrics
 	}
@@ -290,7 +301,7 @@ func holdFor(j *jobs.Job, prog batch.Progress, err error) (hold, attemptStatus s
 	case errors.Is(err, batch.ErrCommitUnknown),
 		// commit_unknown baru berakhir setelah bukti di target berhasil dibaca; selama target belum
 		// bisa dikunci, keadaan itu tetap berlaku.
-		j.Hold == jobs.HoldCommitUnknown && errors.Is(err, batch.ErrBusy):
+		j.Hold == jobs.HoldCommitUnknown && (errors.Is(err, batch.ErrBusy) || isRevalidationRejection(err)):
 		return jobs.HoldCommitUnknown, "commit_unknown"
 	case prog.Batches > 0 && j.Kind == jobs.KindCompensate:
 		return jobs.HoldPartiallyReverted, "partially_reverted"
@@ -362,13 +373,17 @@ func (w *Worker) reject(ctx context.Context, j *jobs.Job, snap workflow.Plan, ca
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	msg := "Revalidasi gagal: " + cause.Error()
+	hold, status := holdFor(j, batch.Progress{Batches: j.CommittedBatches, Rows: j.CommittedRows}, cause)
+	if j.Hold != jobs.HoldNone {
+		hold, status = j.Hold, j.Hold
+	}
 	attemptNo := j.Attempt + 1
 	if exec, err := w.Flow.BeginAttempt(fctx, snap, strconv.FormatInt(j.ID, 10), attemptNo); err == nil {
 		if jobs.SetExecution(fctx, w.DB, j.ID, w.ID, exec, attemptNo) == nil {
-			w.Flow.FinishAttempt(fctx, exec, "failed", msg)
+			w.Flow.FinishAttempt(fctx, exec, status, msg)
 		}
 	}
-	if err := jobs.Fail(fctx, w.DB, j.ID, w.ID, jobs.HoldNone, msg); err == nil && !lost.Load() {
+	if err := jobs.Fail(fctx, w.DB, j.ID, w.ID, hold, msg); err == nil && !lost.Load() {
 		telemetry.Event(ctx, slog.LevelWarn, "job.rejected", "failed", slog.String("error", msg))
 	}
 }

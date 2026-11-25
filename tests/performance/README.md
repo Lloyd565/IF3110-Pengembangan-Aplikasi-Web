@@ -17,16 +17,13 @@ Query yang diukur:
 UPDATE perf.accounts SET balance = balance + 1, updated_at = now();
 ```
 
-| Row | Ukuran tabel | Durasi UPDATE tanpa batch |
-|---:|---:|---:|
-| 500.000 | tidak dicatat | 1,30 s (terlalu dekat dengan batas 1 s) |
-| **2.000.000** | 158 MB (sebelum UPDATE) | **6,16 s dan 6,69 s** (dua kali percobaan) |
+| Baris | UPDATE biasa | Worker batch 10.000 baris | API sampai status terminal |
+|---:|---:|---:|---:|
+| 2.000.000 | 9,217 s | 16,043 s (200 batch) | 16,255 s |
 
-Dataset uji yang dipakai: **2.000.000 row** (>1 detik dengan margin besar, tanpa sleep buatan).
-Gunakan dataset yang sama untuk migration per batch, misalnya batch size 10.000 dengan cursor `id`.
+Dataset berisi 2.000.000 baris dan menghasilkan durasi UPDATE biasa di atas 1 detik tanpa sleep buatan. Migration batch menggunakan dataset yang sama dengan cursor `id`.
 
-Lingkungan: PostgreSQL 16.15 (`postgres:16-alpine`) di Docker Desktop (WSL2), 16 vCPU, RAM 7,6 GB
-untuk VM Docker, Windows 11. Diukur 21 November 2026.
+Lingkungan pengukuran adalah PostgreSQL 16.15 (`postgres:16-alpine`) pada Docker Desktop (WSL2), 16 vCPU, RAM 7,6 GB untuk VM Docker, dan Windows 11. Pengukuran berlangsung pada 25 November 2026.
 
 ## Stress test k6 (`stress.js`)
 
@@ -62,7 +59,8 @@ k6 run -e BASE_URL=http://localhost:8080 -e USERNAME=perf -e PASSWORD=... \
 
 Ringkasan tersimpan di `tests/performance/results/summary.json`.
 
-### Hasil
+### Pengukuran lokal
 
-Belum diukur. Eksekusi job memerlukan modul queue/worker. Tanpa modul itu, enqueue membalas
-`503 module_unavailable`. Tabel hasil dan analisis per tingkat beban diisi setelah worker terintegrasi.
+Skenario k6 menyelesaikan 451 job dengan error rate 0%. API memiliki p95 agregat 325,8 ms dan p95 fase beban 6x sebesar 498,57 ms. Angka tersebut menggambarkan lingkungan serta konfigurasi pengukuran lokal; hasil pada mesin lain mengikuti kapasitas host dan beban database.
+
+Script mencatat latency, error rate, throughput request, waktu antre, durasi job, dan throughput penyelesaian job menurut fase beban. Keberhasilan job dihitung setelah status terminal berhasil.

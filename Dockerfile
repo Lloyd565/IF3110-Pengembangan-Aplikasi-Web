@@ -12,10 +12,12 @@ RUN go mod download
 COPY . .
 COPY --from=frontend /app/web/static/spa ./web/static/spa
 RUN CGO_ENABLED=0 go build -trimpath -o /server ./cmd/server
+RUN CGO_ENABLED=0 go build -trimpath -o /worker ./cmd/worker
 
 FROM alpine:3.23
 RUN apk add --no-cache ca-certificates && adduser -D -u 10001 app
 COPY --from=backend /server /usr/local/bin/server
+COPY --from=backend /worker /usr/local/bin/worker
 USER app
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/server"]

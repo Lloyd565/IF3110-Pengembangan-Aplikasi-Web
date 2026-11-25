@@ -9,14 +9,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/telemetry"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/web"
 	"github.com/google/uuid"
 )
 
 func (s *Server) requestIDs(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Request-ID", uuid.NewString())
-		next.ServeHTTP(w, r)
+		id := uuid.NewString()
+		w.Header().Set("X-Request-ID", id)
+		next.ServeHTTP(w, r.WithContext(telemetry.With(r.Context(), telemetry.Info{CorrelationID: id, Database: "platform"})))
 	})
 }
 

@@ -20,7 +20,7 @@ func readPostgres(ctx context.Context, target *dbconn.Target, schema string) (Sn
 		defer cancel()
 		tx.Rollback(cleanup)
 	}()
-	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout='8s'"); err != nil {
+	if _, err := tx.Exec(ctx, "SET LOCAL standard_conforming_strings=on; SET LOCAL statement_timeout='8s'"); err != nil {
 		return out, err
 	}
 	var exists bool
@@ -80,7 +80,11 @@ func readPostgres(ctx context.Context, target *dbconn.Target, schema string) (Sn
 			COALESCE(seq.seqstart,1),COALESCE(seq.seqincrement,1),COALESCE(seq.seqcache,1),COALESCE(seq.seqcycle,false),COALESCE(seq.seqmin,1),COALESCE(seq.seqmax,0),
 			typ.typnamespace<>'pg_catalog'::regnamespace OR COALESCE(elem.typnamespace<>'pg_catalog'::regnamespace,false),
 			EXISTS(SELECT 1 FROM pg_depend dep JOIN pg_proc proc ON proc.oid=dep.refobjid
-				WHERE dep.classid='pg_attrdef'::regclass AND dep.objid=d.oid AND dep.refclassid='pg_proc'::regclass AND proc.pronamespace<>'pg_catalog'::regnamespace)
+				WHERE dep.classid='pg_attrdef'::regclass AND dep.objid=d.oid AND dep.refclassid='pg_proc'::regclass AND proc.pronamespace<>'pg_catalog'::regnamespace),
+			COALESCE(pg_get_expr(d.adbin,d.adrelid)=format('nextval(''%s''::regclass)',replace(to_regclass(pg_get_serial_sequence(format('%I.%I',$2::text,$3::text),a.attname))::text,'''','''''')),false),
+			EXISTS(SELECT 1 FROM pg_depend dep WHERE dep.classid='pg_attrdef'::regclass AND dep.objid=d.oid AND dep.refclassid='pg_class'::regclass
+				AND NOT (dep.refobjid=a.attrelid AND dep.refobjsubid=a.attnum)),
+			COALESCE(pg_get_serial_sequence(format('%I.%I',$2::text,$3::text),a.attname),'')
 			FROM pg_attribute a JOIN pg_type typ ON typ.oid=a.atttypid LEFT JOIN pg_type elem ON elem.oid=typ.typelem
 			LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
 			LEFT JOIN pg_collation coll ON coll.oid=a.attcollation LEFT JOIN pg_namespace cn ON cn.oid=coll.collnamespace
@@ -93,9 +97,9 @@ func readPostgres(ctx context.Context, target *dbconn.Target, schema string) (Sn
 			var c Column
 			var identity, generated, typeKind, elementKind string
 			var serial, cycle bool
-			var customType, customDefault bool
+			var customType, customDefault, serialDefault, relationDefault bool
 			var start, increment, cache, minValue, maxValue int64
-			if err := rows.Scan(&c.Name, &c.Type, &c.Nullable, &c.Default, &identity, &generated, &serial, &c.Collation, &typeKind, &elementKind, &start, &increment, &cache, &cycle, &minValue, &maxValue, &customType, &customDefault); err != nil {
+			if err := rows.Scan(&c.Name, &c.Type, &c.Nullable, &c.Default, &identity, &generated, &serial, &c.Collation, &typeKind, &elementKind, &start, &increment, &cache, &cycle, &minValue, &maxValue, &customType, &customDefault, &serialDefault, &relationDefault, &c.Sequence); err != nil {
 				rows.Close()
 				return out, err
 			}
@@ -107,10 +111,13 @@ func readPostgres(ctx context.Context, target *dbconn.Target, schema string) (Sn
 			default:
 				if serial {
 					c.Auto = "serial"
+					c.SerialDefaultOverride = !serialDefault
 				}
 			}
 			if c.Auto != "" {
-				c.Default = ""
+				if c.Auto != "serial" || !c.SerialDefaultOverride {
+					c.Default = ""
+				}
 				expectedMax := map[string]int64{"smallint": 32767, "integer": 2147483647, "bigint": 9223372036854775807}[c.Type]
 				if start != 1 || increment != 1 || cache != 1 || cycle || minValue != 1 || maxValue != expectedMax {
 					c.Manual = fmt.Sprintf("opsi sequence khusus (%d,%d,%d,%t,%d,%d)", start, increment, cache, cycle, minValue, maxValue)
@@ -122,6 +129,9 @@ func readPostgres(ctx context.Context, target *dbconn.Target, schema string) (Sn
 			}
 			if customType || typeKind != "b" || (elementKind != "" && elementKind != "b") {
 				c.Manual = "tipe/domain/enum khusus"
+			}
+			if relationDefault && !(c.Auto == "serial" && serialDefault) {
+				c.Manual = "default bergantung sequence atau relasi yang memerlukan pemetaan manual"
 			}
 			if customDefault {
 				c.Manual = "default bergantung fungsi non-builtin"
@@ -143,7 +153,8 @@ func readPostgres(ctx context.Context, target *dbconn.Target, schema string) (Sn
 			con.confupdtype::text,con.confdeltype::text,con.confmatchtype::text,
 			CASE WHEN con.contype='c' THEN pg_get_expr(con.conbin,con.conrelid,false) ELSE '' END,
 			con.condeferrable,con.condeferred,NOT con.convalidated,COALESCE(ix.indnullsnotdistinct,false),con.connoinherit,
-			ARRAY(SELECT a.attname::text FROM unnest(con.confdelsetcols) WITH ORDINALITY k(num,pos) JOIN pg_attribute a ON a.attrelid=con.conrelid AND a.attnum=k.num ORDER BY k.pos)
+			ARRAY(SELECT a.attname::text FROM unnest(con.confdelsetcols) WITH ORDINALITY k(num,pos) JOIN pg_attribute a ON a.attrelid=con.conrelid AND a.attnum=k.num ORDER BY k.pos),
+			ARRAY(SELECT a.attname::text FROM unnest(ix.indkey) WITH ORDINALITY k(num,pos) JOIN pg_attribute a ON a.attrelid=con.conrelid AND a.attnum=k.num WHERE con.contype IN ('p','u') AND k.pos>ix.indnkeyatts ORDER BY k.pos)
 			FROM pg_constraint con LEFT JOIN pg_class rc ON rc.oid=con.confrelid LEFT JOIN pg_namespace rn ON rn.oid=rc.relnamespace
 			LEFT JOIN pg_index ix ON ix.indexrelid=con.conindid WHERE con.conrelid=$1 ORDER BY con.conname`, r.oid)
 		if err != nil {
@@ -152,7 +163,7 @@ func readPostgres(ctx context.Context, target *dbconn.Target, schema string) (Sn
 		for rows.Next() {
 			var c Constraint
 			var kind, update, delete, match string
-			if err := rows.Scan(&c.Name, &kind, &c.Columns, &c.RefSchema, &c.RefTable, &c.RefColumns, &update, &delete, &match, &c.Check, &c.Deferrable, &c.Deferred, &c.NotValid, &c.NullsNotDistinct, &c.NoInherit, &c.DeleteColumns); err != nil {
+			if err := rows.Scan(&c.Name, &kind, &c.Columns, &c.RefSchema, &c.RefTable, &c.RefColumns, &update, &delete, &match, &c.Check, &c.Deferrable, &c.Deferred, &c.NotValid, &c.NullsNotDistinct, &c.NoInherit, &c.DeleteColumns, &c.Include); err != nil {
 				rows.Close()
 				return out, err
 			}

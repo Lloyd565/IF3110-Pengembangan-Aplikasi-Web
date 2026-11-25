@@ -12,6 +12,7 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/explorer"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/telemetry"
 )
 
 func (s *Server) dbAuthorize(w http.ResponseWriter, r *http.Request, act authz.Action) (connID uuid.UUID, p reqctx.Principal, ok bool) {
@@ -29,6 +30,9 @@ func (s *Server) dbAuthorize(w http.ResponseWriter, r *http.Request, act authz.A
 		s.renderError(w, r, http.StatusNotFound, "Database tidak ditemukan.")
 		return
 	}
+	info := telemetry.From(r.Context())
+	info.Database = connID.String()
+	*r = *r.WithContext(telemetry.With(r.Context(), info))
 	if err := s.Authz.Can(r.Context(), p, connID, act); err != nil {
 		if !errors.Is(err, authz.ErrForbidden) {
 			slog.ErrorContext(r.Context(), "authz.backend_failed", "database_id", connID.String(), "action", string(act))

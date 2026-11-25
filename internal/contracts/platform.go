@@ -89,6 +89,7 @@ type Execution struct {
 	SQL                string    `json:"sql"`
 	Attempt            int       `json:"attempt"`
 	RevertsExecutionID string    `json:"reverts_execution_id,omitempty"`
+	ErrorMessage       string    `json:"error_message,omitempty"`
 	CanRollback        bool      `json:"can_rollback"`
 	CanForward         bool      `json:"can_forward"`
 }

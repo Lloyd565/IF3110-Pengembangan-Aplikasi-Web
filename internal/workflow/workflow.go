@@ -105,12 +105,16 @@ func (s *Service) validateDraft(ctx context.Context, connID uuid.UUID, d *contra
 }
 
 const selectMigration = `
-	SELECT m.id, m.connection_id, m.name, m.version, m.created_at, u.username::text, dc.dbms,
+	SELECT m.id, m.connection_id, m.name, coalesce(m.version::bigint, v.version), m.created_at, u.username::text, dc.dbms,
 	       r.id, r.sql_up, r.sql_down, r.irreversible, r.irreversible_reason,
 	       e.action, e.status, e.error_message, e.id IS NOT NULL
 	FROM migrations m
 	JOIN users u ON u.id = m.created_by
 	JOIN db_connections dc ON dc.id = m.connection_id
+	LEFT JOIN (
+		SELECT migration_id, row_number() OVER (PARTITION BY connection_id ORDER BY min(seq)) AS version
+		FROM migration_executions GROUP BY connection_id, migration_id
+	) v ON v.migration_id = m.id
 	JOIN LATERAL (SELECT * FROM migration_revisions WHERE migration_id = m.id ORDER BY number DESC LIMIT 1) r ON true
 	LEFT JOIN LATERAL (SELECT * FROM migration_executions WHERE migration_id = m.id ORDER BY seq DESC LIMIT 1) e ON true`
 
@@ -144,7 +148,7 @@ func scanMigration(row pgx.Row) (contracts.Migration, error) {
 }
 
 func (s *Service) List(ctx context.Context, _ reqctx.Principal, connID uuid.UUID) ([]contracts.Migration, error) {
-	rows, err := s.DB.Query(ctx, selectMigration+` WHERE m.connection_id = $1 ORDER BY m.version DESC NULLS FIRST, m.id DESC`, connID)
+	rows, err := s.DB.Query(ctx, selectMigration+` WHERE m.connection_id = $1 ORDER BY coalesce(m.version::bigint, v.version) DESC NULLS FIRST, m.id DESC`, connID)
 	if err != nil {
 		return nil, err
 	}
@@ -302,6 +306,7 @@ func (s *Service) History(ctx context.Context, _ reqctx.Principal, connID uuid.U
 			return nil, err
 		}
 		x.MigrationID = strconv.FormatInt(x.migrationID, 10)
+		x.ErrorMessage = errMsg
 		list = append(list, x)
 		history = append(history, attempt{x.ID, x.migrationID, x.Action, x.Status, x.RevertsExecutionID})
 	}

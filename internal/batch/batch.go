@@ -60,6 +60,7 @@ type Runner struct {
 	Hooks            Hooks
 	Metrics          Metrics
 	ReconcileWait    time.Duration // batas membaca bukti di target setelah jawaban commit hilang
+	Revalidate       func(context.Context) error
 }
 
 func (r *Runner) reconcileWait() time.Duration {
@@ -287,6 +288,11 @@ func (r *Runner) Run(ctx context.Context, sp Spec, report func(Progress)) (Progr
 		return Progress{}, err
 	}
 	defer s.release()
+	if r.Revalidate != nil {
+		if err := r.Revalidate(ctx); err != nil {
+			return Progress{}, err
+		}
+	}
 	if err := ensureControl(ctx, s.conn); err != nil {
 		return Progress{}, err
 	}
@@ -326,7 +332,7 @@ func (r *Runner) commit(ctx context.Context, tx pgx.Tx, sp Spec, batchNo int) er
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		if IsDefinite(err) {
+		if IsDefinite(err) && !tx.Conn().IsClosed() {
 			return err
 		}
 		if err := r.reconcile(ctx, sp, batchNo, err); err != nil {
@@ -503,6 +509,11 @@ func (r *Runner) Compensate(ctx context.Context, sp Spec, report func(Progress))
 		return Progress{}, err
 	}
 	defer s.release()
+	if r.Revalidate != nil {
+		if err := r.Revalidate(ctx); err != nil {
+			return Progress{}, err
+		}
+	}
 	if err := ensureControl(ctx, s.conn); err != nil {
 		return Progress{}, err
 	}
@@ -527,9 +538,9 @@ func (r *Runner) Compensate(ctx context.Context, sp Spec, report func(Progress))
 	if err != nil {
 		return Progress{}, err
 	}
-	var upBatches int64
-	if err := s.conn.QueryRow(ctx, `SELECT count(*) FROM _platform.migration_checkpoints WHERE root_job = $1 AND op = 'up'`,
-		sp.RootID).Scan(&upBatches); err != nil {
+	var upBatches, upRows int64
+	if err := s.conn.QueryRow(ctx, `SELECT count(*), coalesce(sum(rows_affected), 0) FROM _platform.migration_checkpoints WHERE root_job = $1 AND op = 'up'`,
+		sp.RootID).Scan(&upBatches, &upRows); err != nil {
 		return Progress{}, err
 	}
 	if upBatches == 0 {
@@ -538,10 +549,10 @@ func (r *Runner) Compensate(ctx context.Context, sp Spec, report func(Progress))
 		return Progress{}, fmt.Errorf("%w: eksekusi up tidak punya checkpoint batch", ErrUnsafe)
 	}
 	if _, err := s.conn.Exec(ctx, `INSERT INTO _platform.migration_runs (root_job, op, total_rows) VALUES ($1, 'down', $2)
-		ON CONFLICT DO NOTHING`, sp.RootID, upBatches); err != nil {
+		ON CONFLICT DO NOTHING`, sp.RootID, upRows); err != nil {
 		return Progress{}, err
 	}
-	prog := Progress{Total: &upBatches}
+	prog := Progress{Total: &upRows}
 	if err := s.conn.QueryRow(ctx, `SELECT count(*), coalesce(sum(rows_affected), 0) FROM _platform.migration_checkpoints
 		WHERE root_job = $1 AND op = 'down'`, sp.RootID).Scan(&prog.Batches, &prog.Rows); err != nil {
 		return prog, err

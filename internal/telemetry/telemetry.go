@@ -70,6 +70,9 @@ func (i Info) attrs() []slog.Attr {
 	if i.MigrationID != "" {
 		a = append(a, slog.String("migration_id", i.MigrationID))
 	}
+	if i.RequestID != "" {
+		a = append(a, slog.String("request_id", i.RequestID))
+	}
 	if i.ExecutionID != "" {
 		a = append(a, slog.String("execution_id", i.ExecutionID))
 	}

@@ -35,6 +35,8 @@ type Table struct {
 type Column struct {
 	Name, Type, Default, Auto, Charset, Collation, Extra string
 	Nullable                                             bool
+	SerialDefaultOverride                                bool
+	Sequence                                             string `json:"-"`
 	Manual                                               string
 	Comment                                              string `json:"-"` // Preserve existing MariaDB comments during MODIFY; comments are outside diff scope.
 }
@@ -42,6 +44,7 @@ type Column struct {
 type Constraint struct {
 	Name, Kind                                       string
 	Columns                                          []string
+	Include                                          []string
 	RefSchema, RefTable                              string // Empty RefSchema means the selected schema itself.
 	RefColumns                                       []string
 	DeleteColumns                                    []string

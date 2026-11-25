@@ -6,6 +6,15 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
 )
 
+func (s *Service) Revalidate(ctx context.Context, requestID string, recovery bool) error {
+	if recovery {
+		_, err := s.PrepareRecovery(ctx, requestID)
+		return err
+	}
+	_, err := s.Prepare(ctx, requestID)
+	return err
+}
+
 // PrepareRecovery merevalidasi pengajuan untuk resume job yang tertahan (partial atau
 // commit_unknown). Berbeda dari Prepare, penahan posisi tidak ikut diperiksa karena justru
 // itulah yang sedang dipulihkan; approval seluruh leader, revisi, dan izin eksekusi tetap wajib sah.

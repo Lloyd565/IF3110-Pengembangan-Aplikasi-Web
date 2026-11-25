@@ -32,7 +32,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (status) (if3110_jobs)",
+          "expr": "max by (status) (if3110_jobs)",
           "legendFormat": "{{status}}"
         }
       ],

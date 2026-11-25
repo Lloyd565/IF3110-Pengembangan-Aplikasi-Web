@@ -1,8 +1,11 @@
-.PHONY: run test test-integration vet build db-up frontend observability-up observability-down
+.PHONY: run worker test test-integration vet build db-up frontend observability-up observability-down
 
 # .env dibuat otomatis (kunci acak + admin) jika belum ada
 run: .env db-up frontend
 	go run ./cmd/server
+
+worker: .env
+	go run ./cmd/worker
 
 .env:
 	go run ./cmd/envinit
