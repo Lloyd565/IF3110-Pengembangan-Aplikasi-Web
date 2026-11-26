@@ -16,6 +16,7 @@ import (
 
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/sqlpolicy"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/telemetry"
 )
 
 var (
@@ -121,7 +122,7 @@ func execute(ctx context.Context, platform *pgxpool.Pool, connID uuid.UUID, id, 
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
 	if err := try(saveCtx); err != nil {
-		log.Printf("migration %d: status gagal disimpan, dicoba ulang di background: %v", id, err)
+		log.Printf("migration %d: status gagal disimpan, dicoba ulang di background: %v", id, telemetry.RedactError(err))
 		retryInBackground(id, try)
 		return ErrStatusPending
 	}
@@ -169,7 +170,7 @@ func retryInBackground(id int64, try func(context.Context) error) {
 				log.Printf("migration %d: status berhasil disinkronkan", id)
 				return
 			}
-			log.Printf("migration %d: sinkronisasi status gagal: %v", id, err)
+			log.Printf("migration %d: sinkronisasi status gagal: %v", id, telemetry.RedactError(err))
 		}
 	}()
 }
@@ -269,21 +270,14 @@ func appliedPG(ctx context.Context, target *pgxpool.Pool, id int64) (bool, error
 }
 
 func errorMessage(err error) string {
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) {
+	if errors.Is(err, errInterrupted) || errors.Is(err, ErrBusy) || err.Error() == manualCheckMessage {
 		return err.Error()
 	}
-	msg := fmt.Sprintf("%s: %s (SQLSTATE %s)", pgErr.Severity, pgErr.Message, pgErr.Code)
-	if pgErr.Detail != "" {
-		msg += "\nDetail: " + pgErr.Detail
+	var invalid ValidationError
+	if errors.As(err, &invalid) {
+		return invalid.Error()
 	}
-	if pgErr.Hint != "" {
-		msg += "\nHint: " + pgErr.Hint
-	}
-	if pgErr.Where != "" {
-		msg += "\nKonteks: " + pgErr.Where
-	}
-	return msg
+	return telemetry.RedactError(err)
 }
 
 func ptr[T any](v T) *T { return &v }
@@ -314,7 +308,7 @@ func RecoverInterrupted(ctx context.Context, platform *pgxpool.Pool, open func(c
 		err := try(tryCtx)
 		cancel()
 		if err != nil {
-			log.Printf("migration %d: pemulihan gagal, dicoba ulang di background: %v", p.ID, err)
+			log.Printf("migration %d: pemulihan gagal, dicoba ulang di background: %v", p.ID, telemetry.RedactError(err))
 			retryInBackground(p.ID, try)
 		}
 	}

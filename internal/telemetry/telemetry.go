@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -159,7 +160,24 @@ func RedactError(err error) string {
 	}
 	var pg *pgconn.PgError
 	if errors.As(err, &pg) {
-		return "Database error (SQLSTATE " + pg.Code + ")."
+		code := pg.Code
+		if len(code) != 5 || strings.IndexFunc(code, func(r rune) bool { return (r < '0' || r > '9') && (r < 'A' || r > 'Z') }) >= 0 {
+			return "Operasi database gagal."
+		}
+		message := "Database error"
+		switch code {
+		case "22012":
+			message = "division by zero"
+		case "57014":
+			message = "statement timeout atau query dibatalkan"
+		case "55P03":
+			message = "lock timeout atau lock belum tersedia"
+		}
+		return message + " (SQLSTATE " + code + ")."
+	}
+	var maria *mysql.MySQLError
+	if errors.As(err, &maria) {
+		return fmt.Sprintf("Operasi MariaDB gagal (kode %d).", maria.Number)
 	}
 	return "Operasi database gagal."
 }

@@ -2,6 +2,7 @@ package dbconn
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -141,16 +142,28 @@ func (r *Registry) Pool(ctx context.Context, connID uuid.UUID) (*pgxpool.Pool, e
 	return target.Postgres, nil
 }
 
+const ConfigurationFingerprint = `encode(sha256(convert_to(jsonb_build_array(dc.dbms,dc.host,dc.port,dc.dbname,dc.username,encode(dc.password_enc,'hex'),dc.sslmode,dc.deleted_at)::text,'UTF8')),'hex')`
+const IdentityFingerprint = `encode(sha256(convert_to(jsonb_build_array(dc.id,dc.identity_epoch,dc.dbms,dc.host,dc.port,dc.dbname)::text,'UTF8')),'hex')`
+
+type Querier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
 func (r *Registry) Target(ctx context.Context, connID uuid.UUID) (*Target, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	return r.TargetUsing(ctx, r.DB, connID)
+}
+
+func (r *Registry) TargetUsing(ctx context.Context, q Querier, connID uuid.UUID) (*Target, error) {
 
 	var p Params
 	var enc []byte
-	err := r.DB.QueryRow(ctx, `
-		SELECT host, port, dbname, username, password_enc, sslmode, dbms
-		FROM db_connections WHERE id = $1 AND deleted_at IS NULL`, connID,
-	).Scan(&p.Host, &p.Port, &p.DBName, &p.Username, &enc, &p.SSLMode, &p.DBMS)
+	var configuration, identity string
+	err := q.QueryRow(ctx, `
+  SELECT host, port, dbname, username, password_enc, sslmode, dbms, `+ConfigurationFingerprint+`, `+IdentityFingerprint+`
+  FROM db_connections dc WHERE id = $1 AND deleted_at IS NULL`, connID,
+	).Scan(&p.Host, &p.Port, &p.DBName, &p.Username, &enc, &p.SSLMode, &p.DBMS, &configuration, &identity)
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if errors.Is(err, pgx.ErrNoRows) {
 		if old := r.pools[connID]; old != nil {
 			delete(r.pools, connID)
@@ -170,7 +183,8 @@ func (r *Registry) Target(ctx context.Context, connID uuid.UUID) (*Target, error
 	serialized, _ := json.Marshal(struct {
 		Params     Params
 		Ciphertext []byte
-	}{p, enc})
+		Identity   string
+	}{p, enc, identity})
 	stamp := sha256.Sum256(serialized)
 	if old := r.pools[connID]; old != nil {
 		if r.stamps[connID] == stamp {
@@ -197,6 +211,10 @@ func (r *Registry) Target(ctx context.Context, connID uuid.UUID) (*Target, error
 	if r.stamps == nil {
 		r.stamps = map[uuid.UUID][32]byte{}
 	}
+	pool.Configuration, pool.Identity = configuration, identity
+	mac := hmac.New(sha256.New, key[:])
+	mac.Write([]byte("if3110 recovery evidence v1"))
+	pool.EvidenceKey = mac.Sum(nil)
 	r.pools[connID] = pool
 	r.stamps[connID] = stamp
 	return pool, nil

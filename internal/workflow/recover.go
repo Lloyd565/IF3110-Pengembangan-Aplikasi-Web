@@ -2,7 +2,9 @@ package workflow
 
 import (
 	"context"
+	"errors"
 
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/authz"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
 )
 
@@ -37,12 +39,15 @@ func (s *Service) PrepareRecovery(ctx context.Context, requestID string) (Plan, 
 	if x.Status != "approved" {
 		return Plan{}, conflict("Approval tidak lagi sah (revisi, leader, atau grant berubah).")
 	}
-	if err := s.validateTarget(ctx, x.connID, x); err != nil {
+	if err := s.validateTarget(ctx, s.DB, x.connID, &x, false); err != nil {
 		return Plan{}, err
 	}
 	actor := reqctx.Principal{UserID: *x.queuedBy}
-	if !s.canEdit(ctx, actor, x.connID) {
-		return Plan{}, forbidden("Pengguna yang mengirim ke queue tidak lagi memiliki izin eksekusi.")
+	if err := authz.CanUsing(ctx, s.DB, actor, x.connID, authz.MigrationExecute); err != nil {
+		if errors.Is(err, authz.ErrForbidden) {
+			return Plan{}, forbidden("Pengguna yang mengirim ke queue tidak lagi memiliki izin eksekusi.")
+		}
+		return Plan{}, err
 	}
 	return plan(x, actor.UserID), nil
 }

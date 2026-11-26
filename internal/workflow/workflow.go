@@ -36,6 +36,10 @@ type Plan struct {
 	Scope             string
 	SQL               string
 	ActorID           int64
+	TargetFingerprint string
+	TargetIdentity    string
+	TargetServer      string
+	EvidenceNonce     string
 }
 
 type Queue interface {
@@ -103,7 +107,11 @@ func (s *Service) validateDraft(ctx context.Context, connID uuid.UUID, d *contra
 	}
 	if strings.TrimSpace(d.SQLDown) != "" {
 		if err := migration.CheckSQL(ctx, s.DB, connID, d.SQLDown); err != nil {
-			return migration.ValidationError("SQL down: " + err.Error())
+			var invalid migration.ValidationError
+			if errors.As(err, &invalid) {
+				return migration.ValidationError("SQL down: " + invalid.Error())
+			}
+			return err
 		}
 	}
 	return nil
@@ -282,7 +290,21 @@ func loadPosition(ctx context.Context, q querier, connID uuid.UUID) (position, e
 	if err != nil {
 		return position{}, err
 	}
-	return replay(list), nil
+	pos := replay(list)
+	var held string
+	err = q.QueryRow(ctx, `SELECT coalesce(j.execution_id::text,j.id::text)
+ FROM jobs j WHERE j.connection_id=$1 AND j.status='failed' AND j.hold='commit_unknown'
+ AND NOT EXISTS (SELECT 1 FROM jobs newer WHERE newer.root_job_id=j.root_job_id AND newer.id>j.id AND newer.status='success')
+ AND NOT EXISTS (SELECT 1 FROM migration_executions e WHERE e.id=j.execution_id AND e.status='commit_unknown')
+ ORDER BY j.id LIMIT 1`, connID).Scan(&held)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return position{}, err
+	}
+	if held != "" {
+		pos.blocked = "Bukti execution " + held + " belum terverifikasi; rekonsiliasi diperlukan."
+		pos.blockedID, pos.blockedStatus = held, "commit_unknown"
+	}
+	return pos, nil
 }
 
 func (s *Service) History(ctx context.Context, _ reqctx.Principal, connID uuid.UUID, hide bool) ([]contracts.Execution, error) {
@@ -348,6 +370,9 @@ type request struct {
 	irrev         bool
 	latestRev     string
 	targetMatches bool
+	fingerprint   string
+	identity      string
+	physical      string
 }
 
 const selectRequest = `
@@ -355,7 +380,7 @@ const selectRequest = `
 	       coalesce(q.target_execution_id::text, ''), q.mode, q.batch_size, q.cursor_column, q.scope, q.status,
 	       q.created_by, q.queued_by, r.sql_up, r.sql_down, r.irreversible,
 	       (SELECT id::text FROM migration_revisions WHERE migration_id = q.migration_id ORDER BY number DESC LIMIT 1),
- q.target_fingerprint = ` + targetFingerprint + `
+ q.target_fingerprint = ` + targetFingerprint + ` AND q.target_identity = ` + dbconn.IdentityFingerprint + `, q.target_fingerprint, q.target_identity,q.target_server
 	FROM migration_requests q
 	JOIN migrations m ON m.id = q.migration_id
 	JOIN migration_revisions r ON r.id = q.revision_id
@@ -365,7 +390,7 @@ func scanRequest(row pgx.Row) (request, error) {
 	var x request
 	err := row.Scan(&x.ID, &x.connID, &x.migrationID, &x.MigrationName, &x.RevisionID, &x.Action,
 		&x.TargetExecutionID, &x.Mode, &x.BatchSize, &x.CursorColumn, &x.Scope, &x.stored,
-		&x.createdBy, &x.queuedBy, &x.upSQL, &x.downSQL, &x.irrev, &x.latestRev, &x.targetMatches)
+		&x.createdBy, &x.queuedBy, &x.upSQL, &x.downSQL, &x.irrev, &x.latestRev, &x.targetMatches, &x.fingerprint, &x.identity, &x.physical)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return x, migration.ErrNotFound
 	}
@@ -433,7 +458,7 @@ func evaluate(ctx context.Context, q querier, x *request) error {
 
 func validation(x request, pos position) []string {
 	var out []string
-	if !x.targetMatches {
+	if !x.targetMatches && !(x.stored == "draft" && x.identity == "") {
 		out = append(out, "Konfigurasi target berubah; buat pengajuan baru untuk ditinjau.")
 	}
 	if err := validateBatchRequest(x); err != nil {
@@ -456,8 +481,8 @@ func validation(x request, pos position) []string {
 	return out
 }
 
-func (s *Service) flags(ctx context.Context, p reqctx.Principal, x *request) {
-	edit := s.canEdit(ctx, p, x.connID)
+func (s *Service) flags(ctx context.Context, q querier, p reqctx.Principal, x *request) {
+	edit := authz.CanUsing(ctx, q, p, x.connID, authz.MigrationExecute) == nil
 	valid := len(x.Validation) == 0
 	x.CanSubmit = x.Status == "draft" && edit && valid
 	x.CanEnqueue = x.Status == "approved" && edit && valid
@@ -484,7 +509,7 @@ func (s *Service) load(ctx context.Context, q querier, p reqctx.Principal, connI
 	if err := evaluate(ctx, q, &x); err != nil {
 		return x, err
 	}
-	s.flags(ctx, p, &x)
+	s.flags(ctx, q, p, &x)
 	return x, nil
 }
 
@@ -502,20 +527,38 @@ func (s *Service) Requests(ctx context.Context, p reqctx.Principal, connID uuid.
 		if err := evaluate(ctx, s.DB, &list[i]); err != nil {
 			return nil, err
 		}
-		s.flags(ctx, p, &list[i])
+		s.flags(ctx, s.DB, p, &list[i])
 		out = append(out, list[i].ChangeRequest)
 	}
 	return out, nil
 }
 
 func (s *Service) Request(ctx context.Context, p reqctx.Principal, connID uuid.UUID, rid string) (contracts.ChangeRequest, error) {
-	x, err := s.load(ctx, s.DB, p, connID, rid, false)
+	return s.RequestUsing(ctx, s.DB, p, connID, rid)
+}
+
+func (s *Service) RequestTx(ctx context.Context, tx pgx.Tx, p reqctx.Principal, connID uuid.UUID, rid string) (contracts.ChangeRequest, error) {
+	return s.RequestUsing(ctx, tx, p, connID, rid)
+}
+
+func (s *Service) RequestUsing(ctx context.Context, q querier, p reqctx.Principal, connID uuid.UUID, rid string) (contracts.ChangeRequest, error) {
+	x, err := s.load(ctx, q, p, connID, rid, false)
 	return x.ChangeRequest, err
 }
 
 func (s *Service) Propose(ctx context.Context, p reqctx.Principal, connID uuid.UUID, in contracts.ChangeInput) (contracts.ChangeRequest, error) {
-	if !s.canEdit(ctx, p, connID) {
-		return contracts.ChangeRequest{}, forbidden("Izin Edit diperlukan.")
+	var out contracts.ChangeRequest
+	err := pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
+		var err error
+		out, err = s.ProposeUsing(ctx, tx, p, connID, in)
+		return err
+	})
+	return out, err
+}
+
+func (s *Service) ProposeUsing(ctx context.Context, tx pgx.Tx, p reqctx.Principal, connID uuid.UUID, in contracts.ChangeInput) (contracts.ChangeRequest, error) {
+	if err := authz.CanUsing(ctx, tx, p, connID, authz.MigrationExecute); err != nil {
+		return contracts.ChangeRequest{}, err
 	}
 	mid, err := parseMigrationID(in.MigrationID)
 	if err != nil {
@@ -541,8 +584,9 @@ func (s *Service) Propose(ctx context.Context, p reqctx.Principal, connID uuid.U
 		return contracts.ChangeRequest{}, migration.ValidationError("Cakupan atau kolom cursor terlalu panjang.")
 	}
 	var target *uuid.UUID
+	var originalIdentity, originalServer string
 	var id string
-	err = pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
+	err = func() error {
 		var ok bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM migration_revisions r JOIN migrations m ON m.id = r.migration_id
 			WHERE r.id = $1 AND m.id = $2 AND m.connection_id = $3)`, rev, mid, connID).Scan(&ok); err != nil {
@@ -557,23 +601,40 @@ func (s *Service) Propose(ctx context.Context, p reqctx.Principal, connID uuid.U
 				return migration.ValidationError("Rollback/forward memerlukan execution target.")
 			}
 			var want string
-			err = tx.QueryRow(ctx, `SELECT revision_id::text FROM migration_executions WHERE id = $1 AND migration_id = $2 AND connection_id = $3`, t, mid, connID).Scan(&want)
+			var priorJob *string
+			err = tx.QueryRow(ctx, `SELECT revision_id::text,target_identity,target_server,job_id FROM migration_executions WHERE id = $1 AND migration_id = $2 AND connection_id = $3`, t, mid, connID).Scan(&want, &originalIdentity, &originalServer, &priorJob)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return migration.ErrNotFound
 			}
 			if err != nil {
 				return err
 			}
+			if priorJob != nil && originalIdentity == "" {
+				return conflict("Identitas execution lama belum terverifikasi.")
+			}
 			if want != rev.String() {
 				return migration.ValidationError("Revisi harus sama dengan revisi execution target.")
 			}
 			target = &t
+			if in.Action == "rollback" {
+				err := tx.QueryRow(ctx, `SELECT coalesce(j.plan->>'Mode',''),coalesce((j.plan->>'BatchSize')::int,0),coalesce(j.plan->>'CursorColumn',''),coalesce(j.plan->>'Scope','')
+      FROM migration_executions e JOIN jobs j ON j.id::text=e.job_id WHERE e.id=$1 AND j.plan->>'Mode'='batch'`, t).Scan(&in.Mode, &in.BatchSize, &in.CursorColumn, &in.Scope)
+				if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+					return err
+				}
+			}
 		}
 		var up, down string
 		if err := tx.QueryRow(ctx, `SELECT sql_up,sql_down FROM migration_revisions WHERE id=$1`, rev).Scan(&up, &down); err != nil {
 			return err
 		}
 		x := request{ChangeRequest: contracts.ChangeRequest{ChangeInput: in}, upSQL: up, downSQL: down}
+		if err := tx.QueryRow(ctx, `SELECT `+dbconn.IdentityFingerprint+` FROM db_connections dc WHERE id=$1 AND deleted_at IS NULL FOR SHARE`, connID).Scan(&x.identity); err != nil {
+			return err
+		}
+		if originalIdentity != "" && x.identity != originalIdentity {
+			return conflict("Identitas target berbeda dari execution asal.")
+		}
 		x.SQL = up
 		if in.Action == "rollback" {
 			x.SQL = down
@@ -581,18 +642,21 @@ func (s *Service) Propose(ctx context.Context, p reqctx.Principal, connID uuid.U
 		if err := validateBatchRequest(x); err != nil {
 			return err
 		}
-		if err := s.validateTarget(ctx, connID, x); err != nil {
+		if err := s.validateTarget(ctx, tx, connID, &x, true); err != nil {
 			return err
 		}
+		if originalServer != "" && originalServer != x.physical {
+			return conflict("Server target berbeda dari execution asal.")
+		}
 		return tx.QueryRow(ctx, `
-			INSERT INTO migration_requests (connection_id, migration_id, revision_id, action, target_execution_id, mode, batch_size, cursor_column, scope, created_by, target_fingerprint)
- SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10, `+targetFingerprint+` FROM db_connections dc WHERE dc.id=$1 RETURNING id::text`,
-			connID, mid, rev, in.Action, target, in.Mode, in.BatchSize, strings.TrimSpace(in.CursorColumn), in.Scope, p.UserID).Scan(&id)
-	})
+   INSERT INTO migration_requests (connection_id, migration_id, revision_id, action, target_execution_id, mode, batch_size, cursor_column, scope, created_by, target_fingerprint, target_identity,target_server)
+ SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10, `+targetFingerprint+`, $11,$12 FROM db_connections dc WHERE dc.id=$1 RETURNING id::text`,
+			connID, mid, rev, in.Action, target, in.Mode, in.BatchSize, strings.TrimSpace(in.CursorColumn), in.Scope, p.UserID, x.identity, x.physical).Scan(&id)
+	}()
 	if err != nil {
 		return contracts.ChangeRequest{}, err
 	}
-	return s.Request(ctx, p, connID, id)
+	return s.RequestUsing(ctx, tx, p, connID, id)
 }
 
 func (s *Service) Submit(ctx context.Context, p reqctx.Principal, connID uuid.UUID, rid string) (contracts.ChangeRequest, error) {
@@ -607,13 +671,18 @@ func (s *Service) Submit(ctx context.Context, p reqctx.Principal, connID uuid.UU
 		if len(x.Validation) > 0 {
 			return migration.ValidationError(strings.Join(x.Validation, " "))
 		}
-		if !s.canEdit(ctx, p, connID) {
-			return forbidden("Izin Edit diperlukan.")
-		}
-		if err := s.validateTarget(ctx, connID, x); err != nil {
+		if err := authz.CanUsing(ctx, tx, p, connID, authz.MigrationExecute); err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `UPDATE migration_requests SET status = 'pending_review', submitted_at = now() WHERE id = $1`, x.ID)
+		if x.identity == "" {
+			if err := tx.QueryRow(ctx, `SELECT `+dbconn.IdentityFingerprint+`,`+targetFingerprint+` FROM db_connections dc WHERE id=$1 AND deleted_at IS NULL`, connID).Scan(&x.identity, &x.fingerprint); err != nil {
+				return err
+			}
+		}
+		if err := s.validateTarget(ctx, tx, connID, &x, true); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE migration_requests SET status = 'pending_review', submitted_at = now(), target_identity=$2,target_fingerprint=$3,target_server=$4 WHERE id = $1`, x.ID, x.identity, x.fingerprint, x.physical)
 		return err
 	})
 	if err != nil {
@@ -635,13 +704,16 @@ func (s *Service) Review(ctx context.Context, p reqctx.Principal, connID uuid.UU
 			return migration.ValidationError("Keputusan review tidak valid.")
 		}
 		if f.Decision == "approve" {
+			if !x.targetMatches {
+				return conflict("Identitas atau konfigurasi target tidak lagi sah.")
+			}
 			if err := validateBatchRequest(x); err != nil {
 				return err
 			}
 			if x.stored != "queued" && len(x.Validation) > 0 {
 				return migration.ValidationError(strings.Join(x.Validation, " "))
 			}
-			if err := s.validateTarget(ctx, connID, x); err != nil {
+			if err := s.validateTarget(ctx, tx, connID, &x, true); err != nil {
 				return err
 			}
 		}
@@ -672,7 +744,7 @@ func (s *Service) Review(ctx context.Context, p reqctx.Principal, connID uuid.UU
 func plan(x request, actor int64) Plan {
 	return Plan{RequestID: x.ID, ConnectionID: x.connID, MigrationID: x.MigrationID, RevisionID: x.RevisionID,
 		Action: x.Action, TargetExecutionID: x.TargetExecutionID, Mode: x.Mode, BatchSize: x.BatchSize,
-		CursorColumn: x.CursorColumn, Scope: x.Scope, SQL: x.SQL, ActorID: actor}
+		CursorColumn: x.CursorColumn, Scope: x.Scope, SQL: x.SQL, ActorID: actor, TargetFingerprint: x.fingerprint, TargetIdentity: x.identity, TargetServer: x.physical}
 }
 
 func (s *Service) Enqueue(ctx context.Context, p reqctx.Principal, connID uuid.UUID, rid, key string) (contracts.Job, error) {
@@ -701,7 +773,7 @@ func (s *Service) Enqueue(ctx context.Context, p reqctx.Principal, connID uuid.U
 		if len(x.Validation) > 0 {
 			return conflict(strings.Join(x.Validation, " "))
 		}
-		if err := s.validateTarget(ctx, connID, x); err != nil {
+		if err := s.validateTarget(ctx, tx, connID, &x, true); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE migration_requests SET status = 'queued', queued_by = $2, queued_at = now() WHERE id = $1`, x.ID, p.UserID); err != nil {
@@ -732,15 +804,18 @@ func (s *Service) Prepare(ctx context.Context, requestID string) (Plan, error) {
 	if x.Status != "approved" {
 		return Plan{}, conflict("Approval tidak lagi sah (revisi, leader, atau grant berubah).")
 	}
-	if err := s.validateTarget(ctx, x.connID, x); err != nil {
+	if err := s.validateTarget(ctx, s.DB, x.connID, &x, false); err != nil {
 		return Plan{}, err
 	}
 	if len(x.Validation) > 0 {
 		return Plan{}, conflict(strings.Join(x.Validation, " "))
 	}
 	actor := reqctx.Principal{UserID: *x.queuedBy}
-	if !s.canEdit(ctx, actor, x.connID) {
-		return Plan{}, forbidden("Pengguna yang mengirim ke queue tidak lagi memiliki izin eksekusi.")
+	if err := authz.CanUsing(ctx, s.DB, actor, x.connID, authz.MigrationExecute); err != nil {
+		if errors.Is(err, authz.ErrForbidden) {
+			return Plan{}, forbidden("Pengguna yang mengirim ke queue tidak lagi memiliki izin eksekusi.")
+		}
+		return Plan{}, err
 	}
 	return plan(x, actor.UserID), nil
 }
@@ -758,9 +833,9 @@ func beginAttempt(ctx context.Context, q interface {
 	}
 	var id string
 	err := q.QueryRow(ctx, `
-		INSERT INTO migration_executions (connection_id, migration_id, revision_id, request_id, job_id, action, attempt, status, sql, reverts_execution_id, actor_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8,$9,$10) RETURNING id::text`,
-		pl.ConnectionID, pl.MigrationID, pl.RevisionID, pl.RequestID, jobID, pl.Action, attemptNo, pl.SQL, reverts, pl.ActorID).Scan(&id)
+		INSERT INTO migration_executions (connection_id, migration_id, revision_id, request_id, job_id, action, attempt, status, sql, reverts_execution_id, actor_id, target_identity,target_server)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8,$9,$10,$11,$12) RETURNING id::text`,
+		pl.ConnectionID, pl.MigrationID, pl.RevisionID, pl.RequestID, jobID, pl.Action, attemptNo, pl.SQL, reverts, pl.ActorID, pl.TargetIdentity, pl.TargetServer).Scan(&id)
 	return id, err
 }
 

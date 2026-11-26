@@ -30,8 +30,8 @@ func (q Queue) Enqueue(ctx context.Context, tx pgx.Tx, plan workflow.Plan, key s
 	kind, parent := KindRun, (*int64)(nil)
 	if plan.Action == "rollback" && plan.TargetExecutionID != "" {
 		var jid *string
-		err := tx.QueryRow(ctx, `SELECT job_id FROM migration_executions WHERE id = $1::uuid AND status IN ('partial','partially_reverted')`,
-			plan.TargetExecutionID).Scan(&jid)
+		err := tx.QueryRow(ctx, `SELECT job_id FROM migration_executions WHERE id = $1::uuid AND (status IN ('partial','partially_reverted') OR (status='success' AND $2='batch'))`,
+			plan.TargetExecutionID, plan.Mode).Scan(&jid)
 		if err != nil && err != pgx.ErrNoRows {
 			return contracts.Job{}, err
 		}
@@ -43,11 +43,26 @@ func (q Queue) Enqueue(ctx context.Context, tx pgx.Tx, plan workflow.Plan, key s
 	}
 	// Satu pengajuan hanya boleh punya satu job utama, berapa pun kunci idempotensi yang dikirim.
 	var existing int64
-	err = tx.QueryRow(ctx, `SELECT id FROM jobs WHERE request_id = $1 AND kind = $2 ORDER BY id LIMIT 1`, rid, kind).Scan(&existing)
+	err = tx.QueryRow(ctx, `SELECT id FROM jobs WHERE request_id = $1 AND kind <> 'resume' ORDER BY id LIMIT 1`, rid).Scan(&existing)
 	if err != nil && err != pgx.ErrNoRows {
 		return contracts.Job{}, err
 	}
 	if err == pgx.ErrNoRows {
+		plan.EvidenceNonce = uuid.NewString()
+		if parent != nil {
+			source, err := Get(ctx, tx, *parent)
+			if err != nil {
+				return contracts.Job{}, err
+			}
+			var original workflow.Plan
+			if err := json.Unmarshal(source.Plan, &original); err != nil {
+				return contracts.Job{}, err
+			}
+			if original.TargetIdentity != plan.TargetIdentity || original.EvidenceNonce == "" {
+				return contracts.Job{}, &contracts.Error{Status: 409, Code: "unverified_evidence", Message: "Bukti batch asal tidak dapat diverifikasi."}
+			}
+			plan.EvidenceNonce = original.EvidenceNonce
+		}
 		raw, err := json.Marshal(plan)
 		if err != nil {
 			return contracts.Job{}, err

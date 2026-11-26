@@ -76,7 +76,7 @@ func validateInput(name, sql string) (string, string, error) {
 	return name, sql, nil
 }
 
-func validateConnection(ctx context.Context, db *pgxpool.Pool, connID uuid.UUID, name, sql string) (string, string, error) {
+func validateConnection(ctx context.Context, db dbconn.Querier, connID uuid.UUID, name, sql string) (string, string, error) {
 	name, sql, err := validateInput(name, sql)
 	if err != nil {
 		return name, sql, err
@@ -98,7 +98,7 @@ func validateConnection(ctx context.Context, db *pgxpool.Pool, connID uuid.UUID,
 	return name, sql, err
 }
 
-func CheckSQL(ctx context.Context, db *pgxpool.Pool, connID uuid.UUID, sql string) error {
+func CheckSQL(ctx context.Context, db dbconn.Querier, connID uuid.UUID, sql string) error {
 	_, _, err := validateConnection(ctx, db, connID, "-", sql)
 	return err
 }

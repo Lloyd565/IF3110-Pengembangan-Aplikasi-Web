@@ -27,13 +27,29 @@ func Check(sql string) error {
 	if err != nil {
 		return err
 	}
+	tokens, err := parser.Scan(sql)
+	if err != nil {
+		return errors.New("Sintaks SQL PostgreSQL tidak valid.")
+	}
+	for _, token := range tokens.Tokens {
+		if token.Token == pg.Token_IDENT || token.Token == pg.Token_UIDENT {
+			value := strings.Trim(string(sql[token.Start:token.End]), `"`)
+			if strings.EqualFold(value, "_platform") || strings.EqualFold(value, "set_config") ||
+				strings.HasPrefix(strings.ToLower(value), "pg_advisory_unlock") {
+				return errors.New("Objek dan kontrol sesi internal tidak dapat dipakai dalam migration.")
+			}
+		}
+	}
 	for _, raw := range tree.Stmts {
 		n := raw.Stmt
+		if copy := n.GetCopyStmt(); copy != nil && (copy.IsProgram || copy.Filename != "") {
+			return errors.New("Migration tidak boleh membuka file atau menjalankan program pada server database.")
+		}
 		if n.GetTransactionStmt() != nil {
 			return errors.New("Migration tidak boleh mengatur transaksi; transaksi dikelola platform.")
 		}
 		if v := n.GetVariableSetStmt(); v != nil {
-			if !v.IsLocal || v.Name == "standard_conforming_strings" || v.Name == "transaction_read_only" || v.Name == "session_replication_role" {
+			if !v.IsLocal || v.Name == "role" || v.Name == "session_authorization" || v.Name == "search_path" || v.Name == "standard_conforming_strings" || v.Name == "transaction_read_only" || v.Name == "session_replication_role" {
 				return errors.New("Migration hanya boleh memakai SET LOCAL yang tidak mengubah kebijakan transaksi.")
 			}
 		}

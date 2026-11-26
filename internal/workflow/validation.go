@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/google/uuid"
@@ -33,29 +34,54 @@ func validateBatchRequest(x request) error {
 	return nil
 }
 
-func (s *Service) validateTarget(ctx context.Context, connID uuid.UUID, x request) error {
+func (s *Service) validateTarget(ctx context.Context, q querier, connID uuid.UUID, x *request, inspectTarget bool) error {
 	if strings.TrimSpace(x.SQL) != "" {
-		if err := migration.CheckSQL(ctx, s.DB, connID, x.SQL); err != nil {
+		if err := migration.CheckSQL(ctx, q, connID, x.SQL); err != nil {
 			return err
 		}
 	}
-	if x.Mode != "batch" {
+	if !inspectTarget {
 		return nil
 	}
 	var kind string
-	if err := s.DB.QueryRow(ctx, `SELECT dbms FROM db_connections WHERE id=$1 AND deleted_at IS NULL`, connID).Scan(&kind); err != nil {
+	if err := q.QueryRow(ctx, `SELECT dbms FROM db_connections WHERE id=$1 AND deleted_at IS NULL`, connID).Scan(&kind); err != nil {
 		return err
 	}
-	if kind != string(dbconn.PostgreSQL) {
+	if x.Mode == "batch" && kind != string(dbconn.PostgreSQL) {
 		return migration.ValidationError("Cursor batch M2 tersedia untuk PostgreSQL; MariaDB memakai transaksi DML atau satu DDL per migration.")
 	}
 	if s.Targets != nil {
-		t, err := s.Targets.Target(ctx, connID)
+		var t *dbconn.Target
+		var err error
+		if registry, ok := s.Targets.(interface {
+			TargetUsing(context.Context, dbconn.Querier, uuid.UUID) (*dbconn.Target, error)
+		}); ok {
+			t, err = registry.TargetUsing(ctx, q, connID)
+		} else {
+			t, err = s.Targets.Target(ctx, connID)
+		}
 		if err != nil {
 			return err
 		}
+		if t.Identity != "" && t.Identity != x.identity {
+			return conflict("Identitas target berubah.")
+		}
+		physical, err := t.PhysicalIdentity(ctx)
+		if err != nil {
+			return err
+		}
+		if x.physical != "" && x.physical != physical {
+			return conflict("Server target berubah.")
+		}
+		x.physical = physical
+		if x.Mode != "batch" {
+			return nil
+		}
 		if err := (&batch.Runner{Pool: t.Postgres}).Validate(ctx, batch.Spec{RootID: 1, Op: batch.OpUp, SQL: x.SQL, Size: x.BatchSize, Table: x.Scope, Column: x.CursorColumn}); err != nil {
-			return migration.ValidationError(err.Error())
+			if errors.Is(err, batch.ErrInvalidSpec) {
+				return migration.ValidationError(err.Error())
+			}
+			return err
 		}
 	}
 	return nil
@@ -83,10 +109,13 @@ func (s *Service) FinishAttemptAtomic(ctx context.Context, executionID, status, 
 	})
 }
 
-func (s *Service) AttemptStatus(ctx context.Context, id string) (string, error) {
+func (s *Service) AttemptStatus(ctx context.Context, id string, pl Plan) (string, error) {
 	var status string
-	err := s.DB.QueryRow(ctx, `SELECT status FROM migration_executions WHERE id=$1::uuid`, id).Scan(&status)
+	err := s.DB.QueryRow(ctx, `SELECT e.status FROM migration_executions e JOIN db_connections dc ON dc.id=e.connection_id
+  WHERE e.id=$1::uuid AND e.connection_id=$2 AND e.request_id=$3::uuid AND e.revision_id=$4::uuid AND e.sql=$5 AND e.action=$6
+  AND e.target_identity <> '' AND e.target_identity=$7 AND e.target_server=$8 AND e.target_identity=`+dbconn.IdentityFingerprint+` AND dc.deleted_at IS NULL`,
+		id, pl.ConnectionID, pl.RequestID, pl.RevisionID, pl.SQL, pl.Action, pl.TargetIdentity, pl.TargetServer).Scan(&status)
 	return status, err
 }
 
-const targetFingerprint = `encode(sha256(convert_to(jsonb_build_array(dc.dbms,dc.host,dc.port,dc.dbname,dc.username,encode(dc.password_enc,'hex'),dc.sslmode,dc.deleted_at)::text,'UTF8')),'hex')`
+const targetFingerprint = dbconn.ConfigurationFingerprint

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/admin"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/auth"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/authz"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/batch"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/contracts"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/explorer"
@@ -73,6 +74,8 @@ func apiFailure(w http.ResponseWriter, err error) {
 		apiError(w, service.Status, service.Code, service.Message)
 	case errors.Is(err, admin.ErrInvalid):
 		apiError(w, 422, "validation", strings.TrimPrefix(err.Error(), "admin: input tidak valid: "))
+	case errors.Is(err, authz.ErrForbidden):
+		apiError(w, 403, "forbidden", "Izin Edit diperlukan.")
 	case errors.Is(err, admin.ErrSelf):
 		apiError(w, 422, "self_change", "Aksi ini tidak diizinkan untuk akun Anda sendiri.")
 	case errors.Is(err, admin.ErrNotFound), errors.Is(err, migration.ErrNotFound), errors.Is(err, explorer.ErrNotFound):

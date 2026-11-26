@@ -26,6 +26,9 @@ func mariaRead(ctx context.Context, target *dbconn.Target, fn func(context.Conte
 }
 
 func mariaTable(ctx context.Context, tx *sql.Tx, schema, table string) (string, error) {
+	if dbconn.IsMariaControlTable(table) {
+		return "", ErrNotFound
+	}
 	var kind string
 	err := tx.QueryRowContext(ctx, `SELECT CASE TABLE_TYPE WHEN 'VIEW' THEN 'view' ELSE 'tabel' END
 		FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?`, schema, table).Scan(&kind)
@@ -55,7 +58,7 @@ func mariaSchemas(ctx context.Context, target *dbconn.Target) ([]Schema, error) 
 			if len(out) == 0 {
 				out = append(out, Schema{Name: schema})
 			}
-			if table.Name != "" {
+			if table.Name != "" && !dbconn.IsMariaControlTable(table.Name) {
 				out[0].Tables = append(out[0].Tables, table)
 			}
 		}

@@ -91,6 +91,9 @@ func (s *Service) Recover(ctx context.Context, p reqctx.Principal, connID uuid.U
 	}
 	var out contracts.ChangeRequest
 	err = pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM db_connections WHERE id=$1 FOR UPDATE`, connID); err != nil {
+			return err
+		}
 		var root int64
 		if err := tx.QueryRow(ctx, `SELECT id FROM jobs WHERE id = $1 FOR UPDATE`, j.RootID).Scan(&root); err != nil {
 			return err
@@ -115,6 +118,13 @@ func (s *Service) Recover(ctx context.Context, p reqctx.Principal, connID uuid.U
 func (s *Service) recover(ctx context.Context, p reqctx.Principal, j *Job, action, key string, tx pgx.Tx) (contracts.ChangeRequest, error) {
 	connID, id := j.ConnectionID, strconv.FormatInt(j.ID, 10)
 	pub := Public(j)
+	flow, ok := s.Flow.(interface {
+		RequestTx(context.Context, pgx.Tx, reqctx.Principal, uuid.UUID, string) (contracts.ChangeRequest, error)
+		ProposeUsing(context.Context, pgx.Tx, reqctx.Principal, uuid.UUID, contracts.ChangeInput) (contracts.ChangeRequest, error)
+	})
+	if !ok {
+		return contracts.ChangeRequest{}, apiErr(503, "module_unavailable", "Workflow pemulihan belum tersedia.")
+	}
 	var plan workflow.Plan
 	if err := json.Unmarshal(j.Plan, &plan); err != nil {
 		return contracts.ChangeRequest{}, err
@@ -136,7 +146,7 @@ func (s *Service) recover(ctx context.Context, p reqctx.Principal, j *Job, actio
 			Key: "resume:" + id + ":" + key, Plan: j.Plan, TraceCtx: InjectTrace(ctx)}); err != nil {
 			return contracts.ChangeRequest{}, err
 		}
-		return s.Flow.Request(ctx, p, connID, j.RequestID.String())
+		return flow.RequestTx(ctx, tx, p, connID, j.RequestID.String())
 	case "compensate":
 		if !pub.CanCompensate || j.ExecutionID == "" {
 			return contracts.ChangeRequest{}, apiErr(409, "conflict", "Job ini tidak bisa dikompensasi pada statusnya sekarang.")
@@ -148,12 +158,12 @@ func (s *Service) recover(ctx context.Context, p reqctx.Principal, j *Job, actio
 			AND target_execution_id = $2::uuid AND status IN ('draft','pending_review') ORDER BY created_at DESC LIMIT 1`,
 			connID, j.ExecutionID).Scan(&open)
 		if err == nil {
-			return s.Flow.Request(ctx, p, connID, open)
+			return flow.RequestTx(ctx, tx, p, connID, open)
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return contracts.ChangeRequest{}, err
 		}
-		return s.Flow.Propose(ctx, p, connID, contracts.ChangeInput{
+		return flow.ProposeUsing(ctx, tx, p, connID, contracts.ChangeInput{
 			MigrationID: plan.MigrationID, RevisionID: plan.RevisionID, Action: "rollback", TargetExecutionID: j.ExecutionID,
 			Mode: "batch", BatchSize: plan.BatchSize, CursorColumn: plan.CursorColumn, Scope: plan.Scope,
 		})

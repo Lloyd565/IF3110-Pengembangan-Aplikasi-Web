@@ -70,6 +70,7 @@ type Job struct {
 	MaxRetries       int
 	WorkerID         string
 	ExecutionID      string
+	DispatchReady    bool
 	AttemptOpen      bool // attempt history sudah dibuka tetapi hasilnya belum dicatat
 	CommittedBatches int64
 	CommittedRows    int64
@@ -98,13 +99,13 @@ func (j *Job) PublicStatus() string {
 }
 
 const cols = `id, connection_id, request_id, kind, parent_job_id, root_job_id, plan, status, hold, attempt,
-	retry_count, max_retries, coalesce(worker_id,''), coalesce(execution_id::text,''), attempt_open, committed_batches,
+	retry_count, max_retries, coalesce(worker_id,''), coalesce(execution_id::text,''), attempt_open, dispatch_ready, committed_batches,
 	committed_rows, total_rows, coalesce(error_message,''), trace_context, queued_at, started_at, updated_at`
 
 func scan(row pgx.Row) (*Job, error) {
 	var j Job
 	err := row.Scan(&j.ID, &j.ConnectionID, &j.RequestID, &j.Kind, &j.ParentID, &j.RootID, &j.Plan, &j.Status,
-		&j.Hold, &j.Attempt, &j.RetryCount, &j.MaxRetries, &j.WorkerID, &j.ExecutionID, &j.AttemptOpen, &j.CommittedBatches,
+		&j.Hold, &j.Attempt, &j.RetryCount, &j.MaxRetries, &j.WorkerID, &j.ExecutionID, &j.AttemptOpen, &j.DispatchReady, &j.CommittedBatches,
 		&j.CommittedRows, &j.TotalRows, &j.Error, &j.TraceCtx, &j.QueuedAt, &j.StartedAt, &j.UpdatedAt)
 	return &j, err
 }
@@ -174,14 +175,16 @@ func Claim(ctx context.Context, db *pgxpool.Pool, workerID string, lease time.Du
 
 	var id int64
 	var conn uuid.UUID
+	var previous, target string
 	err = tx.QueryRow(ctx, `
-		SELECT id, connection_id FROM jobs j
+		SELECT id,connection_id,status,coalesce(nullif(plan->>'TargetServer',''),connection_id::text) FROM jobs j
 		WHERE (status = 'queued'
 		       OR (status = 'retry_wait' AND next_retry_at <= now())
 		       OR (status = 'running' AND lease_until < now()))
-		  AND NOT EXISTS (SELECT 1 FROM jobs o WHERE o.connection_id = j.connection_id AND o.id <> j.id
-		                  AND o.status = 'running' AND o.lease_until >= now())
-		ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&id, &conn)
+		  AND NOT EXISTS (SELECT 1 FROM jobs o WHERE (o.connection_id=j.connection_id OR (j.plan->>'TargetServer'<>'' AND j.plan->>'TargetServer'=o.plan->>'TargetServer')) AND o.id <> j.id
+		                  AND (o.status = 'running' AND (o.lease_until > clock_timestamp() OR j.status <> 'running' OR o.id < j.id)
+                            OR o.status = 'retry_wait' AND (o.attempt_open OR o.hold='commit_unknown') AND j.status='queued'))
+		ORDER BY (status = 'running' OR attempt_open) DESC, id FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&id, &conn, &previous, &target)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -190,12 +193,13 @@ func Claim(ctx context.Context, db *pgxpool.Pool, workerID string, lease time.Du
 	}
 	// SKIP LOCKED hanya menjaga baris job. Serialisasi per database dijaga di sini: dua worker
 	// yang mengklaim job berbeda pada database yang sama bergantian lewat advisory lock ini.
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('jobs.claim:' || $1::text))`, conn); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('jobs.claim:' || $1::text))`, target); err != nil {
 		return nil, err
 	}
 	var busy bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM jobs WHERE connection_id = $1 AND id <> $2
-		AND status = 'running' AND lease_until >= now())`, conn, id).Scan(&busy); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM jobs WHERE (connection_id=$1 OR plan->>'TargetServer'=$4) AND id <> $2
+		AND (status = 'running' AND (lease_until > clock_timestamp() OR $3 <> 'running' OR id < $2)
+       OR status = 'retry_wait' AND (attempt_open OR hold='commit_unknown') AND $3='queued'))`, conn, id, previous, target).Scan(&busy); err != nil {
 		return nil, err
 	}
 	if busy {
@@ -233,10 +237,14 @@ func Heartbeat(ctx context.Context, q Querier, id int64, worker string, lease ti
 
 // SetExecution mencatat attempt aktif (execution history milik workflow).
 func SetExecution(ctx context.Context, q Querier, id int64, worker, executionID string, attempt int) error {
-	return fenced(ctx, q, `UPDATE jobs SET execution_id = $3::uuid, attempt = $4, attempt_open = true, updated_at = now()`+mine, id, worker, executionID, attempt)
+	return fenced(ctx, q, `UPDATE jobs SET execution_id = $3::uuid, attempt = $4, attempt_open = true, dispatch_ready=false, updated_at = now()`+mine, id, worker, executionID, attempt)
 }
 
 // CloseAttempt menandai hasil attempt aktif sudah tercatat di history.
+func MarkDispatched(ctx context.Context, q Querier, id int64, worker string) error {
+	return fenced(ctx, q, `UPDATE jobs SET dispatch_ready=true,updated_at=now()`+mine, id, worker)
+}
+
 func CloseAttempt(ctx context.Context, q Querier, id int64, worker string) error {
 	return fenced(ctx, q, `UPDATE jobs SET attempt_open = false, updated_at = now()`+mine, id, worker)
 }
@@ -261,10 +269,22 @@ func Fail(ctx context.Context, q Querier, id int64, worker, hold, msg string) er
 // Retry menjadwalkan ulang setelah jeda. Mengembalikan false jika jatah retry habis
 // (job sudah ditandai failed dengan hold yang diberikan).
 func Retry(ctx context.Context, q Querier, j *Job, worker, hold, msg string, backoff time.Duration) (bool, error) {
+	return retry(ctx, q, j, worker, hold, msg, backoff, false)
+}
+
+func RetryEvidence(ctx context.Context, q Querier, j *Job, worker, msg string, backoff time.Duration) error {
+	if j.RetryCount >= j.MaxRetries {
+		return ErrLeaseLost
+	}
+	_, err := retry(ctx, q, j, worker, HoldCommitUnknown, msg, backoff, true)
+	return err
+}
+
+func retry(ctx context.Context, q Querier, j *Job, worker, hold, msg string, backoff time.Duration, open bool) (bool, error) {
 	if j.RetryCount >= j.MaxRetries {
 		return false, Fail(ctx, q, j.ID, worker, hold, msg)
 	}
 	return true, fenced(ctx, q, `UPDATE jobs SET status = 'retry_wait', retry_count = retry_count + 1, hold = $3,
 		error_message = $4, next_retry_at = now() + $5::interval, worker_id = NULL, lease_until = NULL,
-		attempt_open = false, updated_at = now()`+mine, j.ID, worker, hold, msg, backoff.String())
+		attempt_open = $6, updated_at = now()`+mine, j.ID, worker, hold, msg, backoff.String(), open)
 }

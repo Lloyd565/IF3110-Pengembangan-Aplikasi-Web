@@ -16,8 +16,10 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/authz"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/batch"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/contracts"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
@@ -96,7 +98,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	for ctx.Err() == nil {
 		did, err := w.RunOnce(ctx)
 		if err != nil {
-			slog.Error("worker error", "event", "worker.error", "status", "error", "error", err.Error(), "worker", w.ID)
+			slog.Error("worker error", "event", "worker.error", "status", "error", "error", telemetry.RedactError(err), "worker", w.ID)
 		}
 		if err != nil || !did {
 			select {
@@ -120,6 +122,8 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+var errUnsupportedTarget = errors.New("Target worker harus PostgreSQL atau MariaDB yang terhubung.")
+
 type result int
 
 const (
@@ -132,7 +136,7 @@ func classify(err error) result {
 	switch {
 	case errors.Is(err, batch.ErrCommitUnknown):
 		return unknown
-	case errors.Is(err, batch.ErrUnsafe), errors.Is(err, batch.ErrInvalidSpec):
+	case errors.Is(err, errUnsupportedTarget), errors.Is(err, batch.ErrUnsafe), errors.Is(err, batch.ErrInvalidSpec), errors.Is(err, dbconn.ErrTargetIdentity), errors.Is(err, dbconn.ErrUnknownConnection):
 		return permanent
 	case isRevalidationRejection(err):
 		return permanent
@@ -154,7 +158,17 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 	defer span.End()
 
 	var snap workflow.Plan
-	_ = json.Unmarshal(j.Plan, &snap)
+	if err := json.Unmarshal(j.Plan, &snap); err != nil {
+		hold := j.Hold
+		if j.AttemptOpen || j.CommittedBatches > 0 {
+			hold = jobs.HoldCommitUnknown
+		}
+		returnErr := jobs.Fail(ctx, w.DB, j.ID, w.ID, hold, "Snapshot job tidak dapat dibaca.")
+		if returnErr != nil {
+			telemetry.Event(ctx, slog.LevelWarn, "job.finalize_failed", "awaiting_recovery", slog.String("error", telemetry.RedactError(returnErr)))
+		}
+		return
+	}
 	info := telemetry.Info{Actor: strconv.FormatInt(snap.ActorID, 10), Database: j.ConnectionID.String(), CorrelationID: j.RequestID.String(),
 		MigrationID: snap.MigrationID, RequestID: j.RequestID.String(), JobID: j.ID, Attempt: j.Attempt + 1, Op: snap.Action}
 	ctx = telemetry.With(ctx, info)
@@ -191,39 +205,42 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 
 	if j.AttemptOpen && j.ExecutionID != "" {
 		if r, ok := w.Flow.(interface {
-			AttemptStatus(context.Context, string) (string, error)
+			AttemptStatus(context.Context, string, workflow.Plan) (string, error)
 		}); ok {
-			status, err := r.AttemptStatus(ctx, j.ExecutionID)
+			status, err := r.AttemptStatus(ctx, j.ExecutionID, snap)
 			if err != nil {
+				w.recoveryFailure(ctx, j, status, err, &lost)
 				return
 			}
-			tgt, err := w.Targets.Target(ctx, j.ConnectionID)
+			tgt, err := w.verifiedTarget(ctx, j, snap, true)
 			if err != nil {
+				w.recoveryFailure(ctx, j, status, err, &lost)
 				return
 			}
 			var progress batch.Progress
 			var done bool
-			if tgt.DBMS == dbconn.PostgreSQL {
-				progress, done, err = (&batch.Runner{Pool: tgt.Postgres, LockWait: w.LockWait}).Evidence(ctx, spec(j, snap))
+			if !j.DispatchReady && status == "running" {
+				progress = batch.Progress{Batches: j.CommittedBatches, Rows: j.CommittedRows, Total: j.TotalRows}
+			} else if tgt.DBMS == dbconn.PostgreSQL {
+				progress, done, err = (&batch.Runner{Pool: tgt.Postgres, LockWait: w.LockWait, EvidenceKey: tgt.EvidenceKey, TargetServer: snap.TargetServer}).Evidence(ctx, spec(j, snap))
 			} else {
-				progress, done, err = migration.WorkflowEvidence(ctx, tgt, j.RootID, spec(j, snap).Op, snap.SQL)
+				progress, done, err = migration.WorkflowEvidence(ctx, tgt, j.RootID, spec(j, snap).Op, spec(j, snap).Binding, snap.TargetServer)
+			}
+			if err == nil && ((!done && status == "success") || ((done || progress.Batches > 0) && status == "failed") || progress.Batches < j.CommittedBatches) {
+				err = batch.ErrCommitUnknown
 			}
 			if err != nil {
-				return
-			}
-			if status == "success" && !done {
-				_ = jobs.Fail(ctx, w.DB, j.ID, w.ID, jobs.HoldCommitUnknown, "History mencatat sukses, tetapi bukti target tidak tersedia; periksa target sebelum pemulihan.")
+				w.recoveryFailure(ctx, j, status, err, &lost)
 				return
 			}
 			if done {
 				w.finish(ctx, j, j.ExecutionID, progress, nil, started, &lost)
 				return
 			}
-			hold, status := holdFor(j, progress, errors.New("Worker terputus sebelum menyimpan hasil."))
-			if status == "failed" && j.Hold != jobs.HoldNone {
-				hold, status = j.Hold, j.Hold
-			}
-			if err := w.completeAttempt(ctx, j, j.ExecutionID, status, "Worker sebelumnya terputus; hasil diperiksa dari bukti target.", func(q jobs.Querier) error {
+			verified := *j
+			verified.Hold = jobs.HoldNone
+			hold, attemptStatus := holdFor(&verified, progress, nil)
+			if err := w.completeAttempt(ctx, j, j.ExecutionID, attemptStatus, "Worker sebelumnya terputus; hasil diperiksa dari bukti target.", func(q jobs.Querier) error {
 				if err := jobs.SetProgress(ctx, q, j.ID, w.ID, progress.Batches, progress.Rows, progress.Total, hold); err != nil {
 					return err
 				}
@@ -242,7 +259,15 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 		}
 	}
 
+	if j.RetryCount > j.MaxRetries {
+		_ = jobs.Fail(ctx, w.DB, j.ID, w.ID, j.Hold, "Batas percobaan worker tercapai.")
+		return
+	}
 	plan, err := w.prepare(ctx, j)
+	plan.EvidenceNonce = snap.EvidenceNonce
+	if err == nil && snap.TargetIdentity != "" && plan != snap {
+		err = &contracts.Error{Status: 409, Message: "Rencana eksekusi tidak sama dengan pengajuan pada queue."}
+	}
 	if err != nil {
 		if isRevalidationRejection(err) {
 			w.reject(ctx, j, snap, err, &lost)
@@ -256,6 +281,7 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 	attemptNo := j.Attempt + 1
 	exec, err := w.beginAttempt(ctx, j, plan, attemptNo)
 	if err != nil {
+		w.retry(ctx, j, j.Hold, err, &lost)
 		return
 	}
 
@@ -289,7 +315,7 @@ func isRevalidationRejection(err error) bool {
 	if errors.As(err, &ce) {
 		return ce.Status >= 400 && ce.Status < 500
 	}
-	return errors.As(err, new(migration.ValidationError)) || errors.Is(err, migration.ErrNotFound)
+	return errors.As(err, new(migration.ValidationError)) || errors.Is(err, migration.ErrNotFound) || errors.Is(err, authz.ErrForbidden)
 }
 
 func spec(j *jobs.Job, p workflow.Plan) batch.Spec {
@@ -297,7 +323,7 @@ func spec(j *jobs.Job, p workflow.Plan) batch.Spec {
 	if p.Action == "rollback" {
 		op = batch.OpDown
 	}
-	sp := batch.Spec{RootID: j.RootID, Op: op, SQL: p.SQL}
+	sp := batch.Spec{RootID: j.RootID, Op: op, SQL: p.SQL, Binding: p.TargetIdentity + ":" + p.TargetServer + ":" + p.EvidenceNonce}
 	if p.Mode == "batch" {
 		sp.Size, sp.Table, sp.Column = p.BatchSize, p.Scope, p.CursorColumn
 	}
@@ -306,7 +332,10 @@ func spec(j *jobs.Job, p workflow.Plan) batch.Spec {
 
 func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, lost *atomic.Bool, cancel context.CancelFunc) (batch.Progress, error) {
 	prog := batch.Progress{Batches: j.CommittedBatches, Rows: j.CommittedRows, Total: j.TotalRows}
-	tgt, err := w.Targets.Target(ctx, j.ConnectionID)
+	if err := w.checkJobPosition(ctx, j, plan); err != nil {
+		return prog, err
+	}
+	tgt, err := w.verifiedTarget(ctx, j, plan, false)
 	if err != nil {
 		return prog, err
 	}
@@ -314,20 +343,39 @@ func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, l
 		if plan.Mode == "batch" {
 			return prog, fmt.Errorf("%w: cursor batch memerlukan PostgreSQL", batch.ErrInvalidSpec)
 		}
+		if j.Hold == jobs.HoldCommitUnknown {
+			p, done, err := migration.WorkflowEvidence(ctx, tgt, j.RootID, spec(j, plan).Op, spec(j, plan).Binding, plan.TargetServer)
+			if err != nil {
+				return prog, batch.ErrCommitUnknown
+			}
+			if done {
+				return p, nil
+			}
+			if j.Kind != jobs.KindResume {
+				return p, batch.ErrCommitUnknown
+			}
+		}
 		revalidate := func(ctx context.Context) error {
 			if f, ok := w.Flow.(Revalidator); ok {
+				if err := w.checkJobPosition(ctx, j, plan); err != nil {
+					return err
+				}
 				return f.Revalidate(ctx, j.RequestID.String(), j.Kind != jobs.KindRun || j.Hold != jobs.HoldNone)
 			}
 			return nil
 		}
-		return migration.RunWorkflowMaria(ctx, tgt, j.RootID, spec(j, plan).Op, plan.SQL, revalidate)
+		return migration.RunWorkflowMaria(ctx, tgt, j.RootID, spec(j, plan).Op, plan.SQL, revalidate, func(ctx context.Context) error { return jobs.MarkDispatched(ctx, w.DB, j.ID, w.ID) }, spec(j, plan).Binding, plan.TargetServer)
 	}
 	if tgt.DBMS != dbconn.PostgreSQL || tgt.Postgres == nil {
-		return prog, fmt.Errorf("%w: worker M2 hanya mendukung target PostgreSQL", batch.ErrInvalidSpec)
+		return prog, errUnsupportedTarget
 	}
-	r := &batch.Runner{Pool: tgt.Postgres, LockWait: w.LockWait, StatementTimeout: w.StatementTimeout, Hooks: w.Hooks, ReconcileWait: w.ReconcileWait}
+	r := &batch.Runner{Pool: tgt.Postgres, LockWait: w.LockWait, StatementTimeout: w.StatementTimeout, Hooks: w.Hooks, ReconcileWait: w.ReconcileWait, EvidenceKey: tgt.EvidenceKey, TargetServer: plan.TargetServer,
+		Arm: func(ctx context.Context) error { return jobs.MarkDispatched(ctx, w.DB, j.ID, w.ID) }}
 	if f, ok := w.Flow.(Revalidator); ok {
 		r.Revalidate = func(ctx context.Context) error {
+			if err := w.checkJobPosition(ctx, j, plan); err != nil {
+				return err
+			}
 			return f.Revalidate(ctx, j.RequestID.String(), j.Kind != jobs.KindRun || j.Hold != jobs.HoldNone)
 		}
 	}
@@ -342,6 +390,18 @@ func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, l
 	}
 	sp := spec(j, plan)
 	var p batch.Progress
+	if j.Hold == jobs.HoldCommitUnknown || (len(tgt.EvidenceKey) > 0 && j.CommittedBatches > 0) {
+		evidence, done, proofErr := r.Evidence(ctx, sp)
+		if proofErr != nil || evidence.Batches < prog.Batches {
+			return prog, batch.ErrCommitUnknown
+		}
+		if done {
+			return evidence, nil
+		}
+		if j.Hold == jobs.HoldCommitUnknown && j.Kind != jobs.KindResume {
+			return evidence, batch.ErrCommitUnknown
+		}
+	}
 	if j.Kind == jobs.KindCompensate {
 		p, err = r.Compensate(ctx, sp, report)
 	} else {
@@ -368,9 +428,9 @@ func holdFor(j *jobs.Job, prog batch.Progress, err error) (hold, attemptStatus s
 	case errors.Is(err, batch.ErrCommitUnknown),
 		// commit_unknown baru berakhir setelah bukti di target berhasil dibaca; selama target belum
 		// bisa dikunci, keadaan itu tetap berlaku.
-		j.Hold == jobs.HoldCommitUnknown && (errors.Is(err, batch.ErrBusy) || isRevalidationRejection(err)):
+		j.Hold == jobs.HoldCommitUnknown:
 		return jobs.HoldCommitUnknown, "commit_unknown"
-	case prog.Batches > 0 && j.Kind == jobs.KindCompensate:
+	case j.Kind == jobs.KindCompensate && (prog.Batches > 0 || errors.Is(err, batch.ErrUnsafe)):
 		return jobs.HoldPartiallyReverted, "partially_reverted"
 	case prog.Batches > 0:
 		return jobs.HoldPartial, "partial"
@@ -382,9 +442,17 @@ func (w *Worker) finish(ctx context.Context, j *jobs.Job, exec string, prog batc
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	status, hold, msg := "success", jobs.HoldNone, ""
+	var plan workflow.Plan
+	if runErr == nil {
+		if json.Unmarshal(j.Plan, &plan) == nil && plan.TargetIdentity != "" {
+			if err := w.checkTarget(fctx, j, plan, true); err != nil {
+				runErr = batch.ErrCommitUnknown
+			}
+		}
+	}
 	if runErr != nil {
 		hold, status = holdFor(j, prog, runErr)
-		msg = runErr.Error()
+		msg = executionMessage(runErr)
 	}
 	retried := false
 	err := w.completeAttempt(fctx, j, exec, status, msg, func(q jobs.Querier) error {
@@ -392,6 +460,11 @@ func (w *Worker) finish(ctx context.Context, j *jobs.Job, exec string, prog batc
 			return err
 		}
 		if runErr == nil {
+			if plan.TargetIdentity != "" {
+				if err := w.checkTargetUsing(fctx, q, j, plan, true, true); err != nil {
+					return err
+				}
+			}
 			return jobs.Succeed(fctx, q, j.ID, w.ID)
 		}
 		if ctx.Err() == nil && classify(runErr) == permanent {
@@ -402,6 +475,13 @@ func (w *Worker) finish(ctx context.Context, j *jobs.Job, exec string, prog batc
 		return err
 	})
 	if err != nil {
+		if errors.Is(err, dbconn.ErrUnknownConnection) || errors.Is(err, pgx.ErrNoRows) {
+			w.recoveryFailure(fctx, j, "", err, lost)
+			return
+		}
+		if !errors.Is(err, jobs.ErrLeaseLost) && runErr == nil {
+			telemetry.Event(ctx, slog.LevelWarn, "job.finalize_failed", "awaiting_recovery", slog.String("error", telemetry.RedactError(err)))
+		}
 		return
 	}
 	if retried {
@@ -427,7 +507,7 @@ func (w *Worker) retry(ctx context.Context, j *jobs.Job, hold string, cause erro
 	}
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	again, err := jobs.Retry(rctx, w.DB, j, w.ID, hold, cause.Error(), w.backoff(j.RetryCount))
+	again, err := jobs.Retry(rctx, w.DB, j, w.ID, hold, executionMessage(cause), w.backoff(j.RetryCount))
 	if err != nil {
 		return
 	}
@@ -446,7 +526,7 @@ func (w *Worker) retry(ctx context.Context, j *jobs.Job, hold string, cause erro
 func (w *Worker) reject(ctx context.Context, j *jobs.Job, snap workflow.Plan, cause error, lost *atomic.Bool) {
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	msg := "Revalidasi gagal: " + cause.Error()
+	msg := "Revalidasi gagal: " + executionMessage(cause)
 	hold, status := holdFor(j, batch.Progress{Batches: j.CommittedBatches, Rows: j.CommittedRows}, cause)
 	if j.Hold != jobs.HoldNone {
 		hold, status = j.Hold, j.Hold
@@ -460,6 +540,122 @@ func (w *Worker) reject(ctx context.Context, j *jobs.Job, snap workflow.Plan, ca
 		telemetry.Event(ctx, slog.LevelWarn, "job.rejected", "failed")
 	}
 
+}
+
+func executionMessage(err error) string {
+	if errors.Is(err, errUnsupportedTarget) {
+		return errUnsupportedTarget.Error()
+	}
+	if errors.Is(err, batch.ErrCommitUnknown) {
+		return batch.ErrCommitUnknown.Error()
+	}
+	if errors.Is(err, batch.ErrBusy) {
+		return batch.ErrBusy.Error()
+	}
+	if errors.Is(err, batch.ErrUnsafe) {
+		return batch.ErrUnsafe.Error()
+	}
+	if errors.Is(err, batch.ErrInvalidSpec) {
+		return batch.ErrInvalidSpec.Error()
+	}
+	var c *contracts.Error
+	if errors.As(err, &c) && c.Status >= 400 && c.Status < 500 {
+		return "Izin, approval, revisi, atau target tidak lagi sesuai."
+	}
+	return telemetry.RedactError(err)
+}
+
+func (w *Worker) checkJobPosition(ctx context.Context, j *jobs.Job, p workflow.Plan) error {
+	if p.TargetIdentity == "" {
+		return nil
+	}
+	var conflicting bool
+	err := w.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM jobs a
+ WHERE a.root_job_id<>$1 AND (a.connection_id=$2 OR ($3<>'' AND a.plan->>'TargetServer'=$3))
+ AND a.status IN ('failed','retry_wait') AND a.hold<>'none'
+ AND NOT EXISTS(SELECT 1 FROM jobs b WHERE b.root_job_id=a.root_job_id AND b.id>a.id AND b.status='success'))`, j.RootID, j.ConnectionID, p.TargetServer).Scan(&conflicting)
+	if err != nil {
+		return err
+	}
+	if conflicting {
+		return &contracts.Error{Status: 409, Message: "Target memiliki execution lain yang belum direkonsiliasi."}
+	}
+	return nil
+}
+
+func (w *Worker) checkTarget(ctx context.Context, j *jobs.Job, p workflow.Plan, evidence bool) error {
+	return w.checkTargetUsing(ctx, w.DB, j, p, evidence, false)
+}
+
+func (w *Worker) checkTargetUsing(ctx context.Context, q dbconn.Querier, j *jobs.Job, p workflow.Plan, evidence, lock bool) error {
+	if p.TargetIdentity == "" {
+		if _, real := w.Flow.(*workflow.Service); !real {
+			return nil
+		}
+		return dbconn.ErrUnknownConnection
+	}
+	var identity, configuration string
+	query := `SELECT ` + dbconn.IdentityFingerprint + `,` + dbconn.ConfigurationFingerprint + ` FROM db_connections dc WHERE id=$1 AND deleted_at IS NULL`
+	if lock {
+		query += " FOR SHARE"
+	}
+	err := q.QueryRow(ctx, query, j.ConnectionID).Scan(&identity, &configuration)
+	if err != nil {
+		return err
+	}
+	if p.ConnectionID != j.ConnectionID || p.RequestID != j.RequestID.String() || p.TargetIdentity != identity || (!evidence && p.TargetFingerprint != configuration) {
+		return dbconn.ErrUnknownConnection
+	}
+	return nil
+}
+
+func (w *Worker) verifiedTarget(ctx context.Context, j *jobs.Job, p workflow.Plan, evidence bool) (*dbconn.Target, error) {
+	if err := w.checkTarget(ctx, j, p, evidence); err != nil {
+		return nil, err
+	}
+	tgt, err := w.Targets.Target(ctx, j.ConnectionID)
+	if err != nil {
+		return nil, err
+	}
+	if tgt == nil || (tgt.Identity != "" && (p.TargetServer == "" || p.EvidenceNonce == "")) || (tgt.Identity != "" && tgt.Identity != p.TargetIdentity) || (!evidence && tgt.Configuration != "" && tgt.Configuration != p.TargetFingerprint) {
+		return nil, dbconn.ErrUnknownConnection
+	}
+	return tgt, nil
+}
+
+func (w *Worker) recoveryFailure(ctx context.Context, j *jobs.Job, status string, cause error, lost *atomic.Bool) {
+	if lost.Load() {
+		return
+	}
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	msg := "Bukti target tidak dapat diverifikasi; rekonsiliasi diperlukan."
+	if j.RetryCount < j.MaxRetries && !errors.Is(cause, pgx.ErrNoRows) && !errors.Is(cause, dbconn.ErrUnknownConnection) && classify(cause) == transient {
+		if err := jobs.RetryEvidence(fctx, w.DB, j, w.ID, msg, w.backoff(j.RetryCount)); err == nil {
+			return
+		}
+	}
+	finish := func(q jobs.Querier) error { return jobs.Fail(fctx, q, j.ID, w.ID, jobs.HoldCommitUnknown, msg) }
+	if status == "success" || status == "failed" {
+		_ = finish(w.DB)
+		return
+	}
+	if errors.Is(cause, pgx.ErrNoRows) {
+		_ = pgx.BeginFunc(fctx, w.DB, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(fctx, `UPDATE migration_executions SET status='commit_unknown',
+				error_message=$4, finished_at=clock_timestamp()
+				WHERE id=$1::uuid AND job_id=$2 AND connection_id=$3
+				AND status IN ('running','partial','partially_reverted')`,
+				j.ExecutionID, strconv.FormatInt(j.ID, 10), j.ConnectionID, msg); err != nil {
+				return err
+			}
+			return finish(tx)
+		})
+		return
+	}
+	if err := w.completeAttempt(fctx, j, j.ExecutionID, "commit_unknown", msg, finish); errors.Is(err, pgx.ErrNoRows) || isRevalidationRejection(err) {
+		_ = finish(w.DB)
+	}
 }
 
 func (w *Worker) observeFinished(outcome string, started time.Time) {

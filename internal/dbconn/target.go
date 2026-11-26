@@ -44,10 +44,13 @@ func NormalizeDBMS(value DBMS) (DBMS, error) {
 }
 
 type Target struct {
-	DBMS     DBMS
-	Database string
-	Postgres *pgxpool.Pool
-	Maria    *sql.DB
+	Configuration string
+	Identity      string
+	EvidenceKey   []byte
+	DBMS          DBMS
+	Database      string
+	Postgres      *pgxpool.Pool
+	Maria         *sql.DB
 }
 
 func (t *Target) Close() {

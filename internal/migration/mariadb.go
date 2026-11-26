@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/telemetry"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -136,6 +137,9 @@ func mariaScope(stmts []mariaStatement, database string) error {
 		current := state{query: hasPrefixWord(st.Normal, "delete")}
 		var stack []state
 		for i, tok := range st.Tokens {
+			if tok.word && (dbconn.IsMariaControlTable(tok.text) || strings.EqualFold(tok.text, "release_lock") || strings.EqualFold(tok.text, "release_all_locks")) {
+				return ValidationError("MariaDB: objek dan kunci internal tidak dapat dipakai dalam migration.")
+			}
 			if tok.text == "(" {
 				relation := current.relation
 				stack = append(stack, current)
@@ -326,7 +330,9 @@ func targetRunner(target *dbconn.Target) runner {
 		validate: func(source string) error { return checkMariaDatabase(source, target.Database) },
 		ping:     target.Ping,
 		run:      func(ctx context.Context, id int64, sql string) error { return runMaria(ctx, target, id, sql) },
-		applied:  func(ctx context.Context, id int64, sql string) (bool, error) { return appliedMaria(ctx, target, id, sql) },
+		applied: func(ctx context.Context, id int64, sql string) (bool, error) {
+			return appliedMaria(ctx, target, id, sql)
+		},
 	}
 }
 
@@ -425,7 +431,7 @@ func runMaria(ctx context.Context, target *dbconn.Target, id int64, source strin
 			}
 			// DDL sudah ter-commit; gagal mencatat riwayat tidak membatalkannya.
 			if _, err := conn.ExecContext(ctx, record, id); err != nil {
-				log.Printf("migration %d: DDL berhasil tetapi riwayat MariaDB gagal dicatat: %v", id, err)
+				log.Printf("migration %d: DDL berhasil tetapi riwayat MariaDB gagal dicatat: %s", id, telemetry.RedactError(err))
 			}
 			return nil
 		}
