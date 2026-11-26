@@ -15,7 +15,7 @@ export function useResource<T>(path: string | null) {
     if (path) api<T>(path, { signal: controller.signal }).then(value => { if (!controller.signal.aborted) setData(value) }).catch(e => { if (!controller.signal.aborted) setError(e) }).finally(() => { if (!controller.signal.aborted) setLoading(false) })
     return () => controller.abort()
   }, [path, version])
-  return { data, error, loading, reload }
+  return { data: previous.current === path ? data : null, error: previous.current === path ? error : null, loading: previous.current !== path ? !!path : loading, reload }
 }
 
 export function ErrorBox({ error, retry }: { error: unknown; retry?: () => void }) {
@@ -34,26 +34,30 @@ export function date(value: string) { return value ? new Intl.DateTimeFormat('id
 
 export function Form({ children, onSubmit, reset = false }: { children: ReactNode; onSubmit: (data: FormData) => Promise<void>; reset?: boolean }) {
   const [busy, setBusy] = useState(false)
+  const pending = useRef(false)
   const [error, setError] = useState<unknown>(null)
   async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if (busy) return
+    event.preventDefault(); if (pending.current) return
+    pending.current = true
     const form = event.currentTarget
     const data = new FormData(form)
     const submitter = (event.nativeEvent as SubmitEvent).submitter
     if (submitter instanceof HTMLButtonElement && submitter.name) data.set(submitter.name, submitter.value)
     setBusy(true); setError(null)
-    try { await onSubmit(data); if (reset) form.reset() } catch (e) { setError(e) } finally { setBusy(false) }
+    try { await onSubmit(data); if (reset) form.reset() } catch (e) { setError(e) } finally { pending.current = false; setBusy(false) }
   }
   return <form onSubmit={submit}><ErrorBox error={error} /><fieldset disabled={busy}>{children}</fieldset>{busy && <p role="status">Memproses…</p>}</form>
 }
 
 export function Action({ children, run, danger = false, confirm, disabled = false }: { children: ReactNode; run: () => Promise<void>; danger?: boolean; confirm?: string; disabled?: boolean }) {
   const [busy, setBusy] = useState(false)
+  const pending = useRef(false)
   const [error, setError] = useState<unknown>(null)
   return <span className="action"><button type="button" className={danger ? 'danger' : 'secondary'} disabled={disabled || busy} onClick={async () => {
-    if (busy || (confirm && !window.confirm(confirm))) return
+    if (pending.current || (confirm && !window.confirm(confirm))) return
+    pending.current = true
     setBusy(true); setError(null)
-    try { await run() } catch (e) { setError(e) } finally { setBusy(false) }
+    try { await run() } catch (e) { setError(e) } finally { pending.current = false; setBusy(false) }
   }}>{busy ? 'Memproses…' : children}</button><ErrorBox error={error} /></span>
 }
 

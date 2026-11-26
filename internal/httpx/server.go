@@ -76,7 +76,7 @@ func (s *Server) Routes() http.Handler {
 			}
 			apiError(w, http.StatusGone, "legacy_endpoint_disabled", "Gunakan API dan workflow migration. Eksekusi langsung sudah dinonaktifkan.")
 		})
-		return s.requestIDs(s.recoverMiddleware(s.secureHeaders(s.apiLogging(s.sessionMiddleware(s.csrfMiddleware(mux))))))
+		return s.requestIDs(s.recoverMiddleware(s.secureHeaders(s.apiLogging(s.requestBodyMiddleware(s.sessionMiddleware(s.csrfMiddleware(mux)))))))
 	}
 	protected := func(pattern string, handler http.HandlerFunc) {
 		mux.Handle(pattern, s.requireAuth(handler))
@@ -119,7 +119,7 @@ func (s *Server) Routes() http.Handler {
 		s.renderError(w, r, http.StatusNotFound, "Halaman tidak ditemukan.")
 	})
 
-	return s.requestIDs(s.recoverMiddleware(s.secureHeaders(requestLogging(s.sessionMiddleware(s.csrfMiddleware(mux))))))
+	return s.requestIDs(s.recoverMiddleware(s.secureHeaders(requestLogging(s.requestBodyMiddleware(s.sessionMiddleware(s.csrfMiddleware(mux)))))))
 }
 
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {

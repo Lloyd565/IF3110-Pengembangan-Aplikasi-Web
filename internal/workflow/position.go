@@ -28,15 +28,18 @@ type position struct {
 
 func replay(history []attempt) position {
 	p := position{applied: map[int64]string{}, rolled: map[int64]string{}}
-	latest := map[int64]attempt{}
+	pending := map[int64]attempt{}
 	for _, a := range history {
-		latest[a.MigrationID] = a
+		if unresolved[a.Status] {
+			pending[a.MigrationID] = a
+		}
 		if a.Status != "success" {
 			continue
 		}
+		delete(pending, a.MigrationID)
 		switch a.Action {
 		case "apply":
-			p.active = append(p.active, a.MigrationID)
+			p.active = append(remove(p.active, a.MigrationID), a.MigrationID)
 			p.undone = nil
 			p.applied[a.MigrationID] = a.ID
 		case "rollback":
@@ -46,13 +49,13 @@ func replay(history []attempt) position {
 			delete(p.applied, a.MigrationID)
 		case "forward":
 			p.undone = remove(p.undone, a.MigrationID)
-			p.active = append(p.active, a.MigrationID)
+			p.active = append(remove(p.active, a.MigrationID), a.MigrationID)
 			p.applied[a.MigrationID] = a.ID
 			delete(p.rolled, a.MigrationID)
 		}
 	}
 	for _, a := range history {
-		if l := latest[a.MigrationID]; l.ID == a.ID && unresolved[a.Status] {
+		if l := pending[a.MigrationID]; l.ID == a.ID && unresolved[a.Status] {
 			p.blocked = fmt.Sprintf("Execution %s berstatus %s; rekonsiliasi dulu sebelum perubahan lain dijalankan.", a.ID, a.Status)
 			p.blockedID, p.blockedStatus = a.ID, a.Status
 		}

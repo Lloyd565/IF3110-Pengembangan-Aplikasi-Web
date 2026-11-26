@@ -153,14 +153,14 @@ func TestPgxTracerLogsEverySQLWithRedaction(t *testing.T) {
 	}
 }
 
-func TestRedactErrorMasksInputValuesOnlyInDataErrors(t *testing.T) {
+func TestRedactErrorPreservesSQLStateWithoutServerValues(t *testing.T) {
 	data := &pgconn.PgError{Code: "22P02", Message: `invalid input syntax for type integer: "rahasia123"`}
-	if got := RedactError(data); strings.Contains(got, "rahasia123") || !strings.Contains(got, "invalid input syntax") {
+	if got := RedactError(data); strings.Contains(got, "rahasia123") || !strings.Contains(got, "22P02") {
 		t.Errorf("nilai input harus disamarkan, pesan tetap terbaca: %q", got)
 	}
 	other := &pgconn.PgError{Code: "42P01", Message: `relation "tidak_ada" does not exist`}
-	if got := RedactError(other); !strings.Contains(got, "tidak_ada") {
-		t.Errorf("error non-data harus utuh agar mudah ditelusuri: %q", got)
+	if got := RedactError(other); strings.Contains(got, "tidak_ada") || !strings.Contains(got, "42P01") {
+		t.Errorf("error harus mempertahankan SQLSTATE tanpa nilai server: %q", got)
 	}
 	if RedactError(nil) != "" {
 		t.Error("nil harus menghasilkan string kosong")

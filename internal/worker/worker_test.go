@@ -371,8 +371,11 @@ func TestCrashedWorkerJobIsTakenOverWithoutRepeatingBatches(t *testing.T) {
 	w.Hooks.AfterCommit = func(op string, n int) error { seen = append(seen, n); return nil }
 	e.drain(w)
 	j := e.job(id)
-	if j.Status != "success" || j.WorkerID != "pengganti" || j.Attempt != 2 {
+	if j.Status != "success" || !strings.HasPrefix(j.WorkerID, "pengganti:") || j.Attempt != 2 {
 		t.Fatalf("worker pengganti harus menyelesaikan: %+v", j)
+	}
+	if _, err := uuid.Parse(strings.TrimPrefix(j.WorkerID, "pengganti:")); err != nil {
+		t.Fatalf("klaim worker harus memiliki token UUID: %v", err)
 	}
 	eq(t, "attempts", e.flow.statuses(), "[failed success]")
 	if e.flow.attempts[0].Err == "" {

@@ -1,8 +1,10 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log"
 	"mime"
 	"net"
@@ -115,6 +117,29 @@ func sameOrigin(r *http.Request, publicOrigin string) bool {
 	}
 	return err == nil && u.Scheme == scheme && strings.EqualFold(u.Host, host) &&
 		u.User == nil && u.Path == "" && u.RawQuery == "" && u.Fragment == ""
+}
+
+func (s *Server) requestBodyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body == nil || r.Body == http.NoBody {
+			next.ServeHTTP(w, r)
+			return
+		}
+		limited := http.MaxBytesReader(w, r.Body, maxFormBytes)
+		body, err := io.ReadAll(limited)
+		limited.Close()
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.As(err, new(*http.MaxBytesError)) {
+				status = http.StatusRequestEntityTooLarge
+			}
+			s.renderError(w, r, status, "Body request tidak valid atau terlalu besar.")
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) csrfMiddleware(next http.Handler) http.Handler {

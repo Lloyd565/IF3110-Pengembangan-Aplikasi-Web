@@ -223,7 +223,7 @@ func fenced(ctx context.Context, q Querier, sql string, id int64, worker string,
 	return nil
 }
 
-const mine = ` WHERE id = $1 AND worker_id = $2 AND status = 'running'`
+const mine = ` WHERE id = $1 AND worker_id = $2 AND status = 'running' AND lease_until > clock_timestamp()`
 
 // Heartbeat memperpanjang lease. ErrLeaseLost berarti job sudah diambil worker lain.
 func Heartbeat(ctx context.Context, q Querier, id int64, worker string, lease time.Duration) error {

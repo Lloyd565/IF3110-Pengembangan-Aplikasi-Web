@@ -8,14 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	pg "github.com/pganalyze/pg_query_go/v6"
 	"github.com/prometheus/client_golang/prometheus"
+	parser "github.com/wasilibs/go-pgquery"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -100,75 +101,67 @@ func Tracer() trace.Tracer { return otel.Tracer("if3110/worker") }
 // RedactSQL menyamarkan literal string dan isi dollar-quote, tempat password atau data sensitif
 // biasanya ditulis (mis. ALTER ROLE ... PASSWORD '...'), lalu memotong query yang terlalu panjang.
 func RedactSQL(q string) string {
+	if strings.IndexByte(q, 0) >= 0 {
+		return "[SQL redacted]"
+	}
+	scanned, err := parser.Scan(q)
+	if err != nil {
+		return "[SQL redacted]"
+	}
 	var b strings.Builder
-	for i := 0; i < len(q); {
-		switch c := q[i]; {
-		case c == '\'':
-			j := i + 1
-			for j < len(q) {
-				if q[j] == '\'' {
-					if j+1 < len(q) && q[j+1] == '\'' {
-						j += 2
-						continue
-					}
-					break
+	last := 0
+	for _, token := range scanned.Tokens {
+		start, end := int(token.Start), int(token.End)
+		if start < last || end < start || end > len(q) {
+			return "[SQL redacted]"
+		}
+		b.WriteString(q[last:start])
+		raw := q[start:end]
+		switch token.Token {
+		case pg.Token_SQL_COMMENT, pg.Token_C_COMMENT:
+			b.WriteByte(' ')
+		case pg.Token_SCONST, pg.Token_USCONST, pg.Token_BCONST, pg.Token_XCONST:
+			if strings.HasPrefix(raw, "$") {
+				endTag := strings.IndexByte(raw[1:], '$')
+				if endTag >= 0 {
+					tag := raw[:endTag+2]
+					b.WriteString(tag + "?" + tag)
+				} else {
+					b.WriteString("'?'")
 				}
-				j++
-			}
-			b.WriteString("'?'")
-			i = j + 1
-		case c == '$' && i+1 < len(q) && (q[i+1] == '$' || isTagStart(q[i+1])):
-			end := strings.IndexByte(q[i+1:], '$')
-			if end < 0 || !validTag(q[i+1:i+1+end]) {
-				b.WriteByte(c)
-				i++
-				continue
-			}
-			tag := q[i : i+end+2]
-			if close := strings.Index(q[i+len(tag):], tag); close >= 0 {
-				b.WriteString(tag + "?" + tag)
-				i += len(tag) + close + len(tag)
 			} else {
-				b.WriteString(tag + "?")
-				i = len(q)
+				b.WriteString("'?'")
+			}
+		case pg.Token_UIDENT:
+			b.WriteString("\"?\"")
+		case pg.Token_IDENT:
+			if strings.HasPrefix(raw, "\"") {
+				b.WriteString("\"?\"")
+			} else {
+				b.WriteString(raw)
 			}
 		default:
-			b.WriteByte(c)
-			i++
+			b.WriteString(raw)
 		}
+		last = end
 	}
+	b.WriteString(q[last:])
 	out := b.String()
 	if len(out) > maxQueryLog {
-		out = out[:maxQueryLog] + "…"
+		out = out[:maxQueryLog] + "..."
 	}
 	return out
 }
 
-func isTagStart(c byte) bool { return c == '_' || (c|0x20 >= 'a' && c|0x20 <= 'z') }
-
-func validTag(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if !isTagStart(s[i]) && !(i > 0 && s[i] >= '0' && s[i] <= '9') {
-			return false
-		}
-	}
-	return true
-}
-
-var quoted = regexp.MustCompile(`"[^"]*"|'[^']*'`)
-
-// RedactError menyamarkan nilai yang ikut tertulis di pesan error server. Error data (SQLSTATE kelas 22)
-// memuat nilai input apa adanya, mis. `invalid input syntax for type integer: "rahasia"`, sehingga isi
-// kutipannya disamarkan; error lain (relation "x" does not exist) tetap utuh agar mudah ditelusuri.
 func RedactError(err error) string {
 	if err == nil {
 		return ""
 	}
 	var pg *pgconn.PgError
-	if errors.As(err, &pg) && strings.HasPrefix(pg.Code, "22") {
-		return quoted.ReplaceAllString(err.Error(), `"?"`)
+	if errors.As(err, &pg) {
+		return "Database error (SQLSTATE " + pg.Code + ")."
 	}
-	return err.Error()
+	return "Operasi database gagal."
 }
 
 // RedactArgs: angka, boolean, dan waktu boleh tampil; teks dan biner disamarkan.

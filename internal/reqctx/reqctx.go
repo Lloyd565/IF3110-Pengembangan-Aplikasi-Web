@@ -3,9 +3,10 @@ package reqctx
 import "context"
 
 type Principal struct {
-	UserID          int64
-	Username        string
-	IsPlatformAdmin bool
+	UserID            int64
+	Username          string
+	IsPlatformAdmin   bool
+	CredentialVersion string `json:"-"`
 }
 
 type key int

@@ -99,7 +99,7 @@ func main() {
 		id = host + "-" + strconv.Itoa(os.Getpid())
 	}
 	w := &worker.Worker{
-		DB: pool, Flow: &workflow.Service{DB: pool, Authz: &authz.Authorizer{DB: pool}}, Targets: conns, ID: id,
+		DB: pool, Flow: &workflow.Service{DB: pool, Authz: &authz.Authorizer{DB: pool}, Targets: conns}, Targets: conns, ID: id,
 		Lease:            duration("WORKER_LEASE", 30*time.Second),
 		Poll:             duration("WORKER_POLL", time.Second),
 		LockWait:         duration("WORKER_LOCK_WAIT", 30*time.Second),

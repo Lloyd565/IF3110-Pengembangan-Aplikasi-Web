@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -109,11 +110,13 @@ func (w *Worker) Run(ctx context.Context) error {
 
 // RunOnce mengklaim dan memproses satu job. false berarti tidak ada pekerjaan.
 func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
-	j, err := jobs.Claim(ctx, w.DB, w.ID, w.lease())
+	owner := *w
+	owner.ID = w.ID + ":" + uuid.NewString()
+	j, err := jobs.Claim(ctx, w.DB, owner.ID, w.lease())
 	if err != nil || j == nil {
 		return false, err
 	}
-	w.process(ctx, j)
+	owner.process(ctx, j)
 	return true, nil
 }
 
@@ -135,6 +138,8 @@ func classify(err error) result {
 		return permanent
 	case batch.IsTransient(err):
 		return transient
+	case errors.As(err, new(*mysql.MySQLError)):
+		return permanent
 	case batch.IsDefinite(err):
 		return permanent
 	}
@@ -163,7 +168,7 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 	defer close(stop)
 	hctx := ctx // salinan: ctx milik proses ditimpa di bawah, goroutine tidak boleh membacanya
 	go func() {
-		t := time.NewTicker(w.lease() / 3)
+		t := time.NewTicker(max(w.lease()/3, time.Millisecond))
 		defer t.Stop()
 		for {
 			select {
@@ -172,7 +177,10 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 			case <-hctx.Done():
 				return
 			case <-t.C:
-				if err := jobs.Heartbeat(hctx, w.DB, j.ID, w.ID, w.lease()); errors.Is(err, jobs.ErrLeaseLost) {
+				heartbeatCtx, heartbeatCancel := context.WithTimeout(hctx, max(w.lease()/3, time.Millisecond))
+				err := jobs.Heartbeat(heartbeatCtx, w.DB, j.ID, w.ID, w.lease())
+				heartbeatCancel()
+				if err != nil {
 					lost.Store(true)
 					cancel()
 					return
@@ -181,14 +189,56 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 		}
 	}()
 
-	// attempt yang ditinggal worker sebelumnya (mati sebelum mencatat hasil) ditutup lebih dulu.
 	if j.AttemptOpen && j.ExecutionID != "" {
-		if err := w.Flow.FinishAttempt(ctx, j.ExecutionID, "failed", "Worker sebelumnya berhenti sebelum mencatat hasil attempt."); err != nil {
-			w.retry(ctx, j, j.Hold, err, &lost)
-			return
-		}
-		if err := jobs.CloseAttempt(ctx, w.DB, j.ID, w.ID); err != nil {
-			return
+		if r, ok := w.Flow.(interface {
+			AttemptStatus(context.Context, string) (string, error)
+		}); ok {
+			status, err := r.AttemptStatus(ctx, j.ExecutionID)
+			if err != nil {
+				return
+			}
+			tgt, err := w.Targets.Target(ctx, j.ConnectionID)
+			if err != nil {
+				return
+			}
+			var progress batch.Progress
+			var done bool
+			if tgt.DBMS == dbconn.PostgreSQL {
+				progress, done, err = (&batch.Runner{Pool: tgt.Postgres, LockWait: w.LockWait}).Evidence(ctx, spec(j, snap))
+			} else {
+				progress, done, err = migration.WorkflowEvidence(ctx, tgt, j.RootID, spec(j, snap).Op, snap.SQL)
+			}
+			if err != nil {
+				return
+			}
+			if status == "success" && !done {
+				_ = jobs.Fail(ctx, w.DB, j.ID, w.ID, jobs.HoldCommitUnknown, "History mencatat sukses, tetapi bukti target tidak tersedia; periksa target sebelum pemulihan.")
+				return
+			}
+			if done {
+				w.finish(ctx, j, j.ExecutionID, progress, nil, started, &lost)
+				return
+			}
+			hold, status := holdFor(j, progress, errors.New("Worker terputus sebelum menyimpan hasil."))
+			if status == "failed" && j.Hold != jobs.HoldNone {
+				hold, status = j.Hold, j.Hold
+			}
+			if err := w.completeAttempt(ctx, j, j.ExecutionID, status, "Worker sebelumnya terputus; hasil diperiksa dari bukti target.", func(q jobs.Querier) error {
+				if err := jobs.SetProgress(ctx, q, j.ID, w.ID, progress.Batches, progress.Rows, progress.Total, hold); err != nil {
+					return err
+				}
+				return jobs.CloseAttempt(ctx, q, j.ID, w.ID)
+			}); err != nil {
+				return
+			}
+			j.Hold, j.CommittedBatches, j.CommittedRows, j.TotalRows = hold, progress.Batches, progress.Rows, progress.Total
+		} else {
+			if err := w.Flow.FinishAttempt(ctx, j.ExecutionID, "failed", "Worker sebelumnya terputus."); err != nil {
+				return
+			}
+			if err := jobs.CloseAttempt(ctx, w.DB, j.ID, w.ID); err != nil {
+				return
+			}
 		}
 	}
 
@@ -204,14 +254,11 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 	info.Op, info.MigrationID, info.Actor = plan.Action, plan.MigrationID, strconv.FormatInt(plan.ActorID, 10)
 
 	attemptNo := j.Attempt + 1
-	exec, err := w.Flow.BeginAttempt(ctx, plan, strconv.FormatInt(j.ID, 10), attemptNo)
+	exec, err := w.beginAttempt(ctx, j, plan, attemptNo)
 	if err != nil {
-		w.retry(ctx, j, j.Hold, err, &lost)
 		return
 	}
-	if err := jobs.SetExecution(ctx, w.DB, j.ID, w.ID, exec, attemptNo); err != nil {
-		return // lease hilang: worker lain yang menutup attempt ini
-	}
+
 	info.ExecutionID, info.Attempt = exec, attemptNo
 	ctx = telemetry.With(ctx, info)
 
@@ -263,6 +310,18 @@ func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, l
 	if err != nil {
 		return prog, err
 	}
+	if tgt.DBMS == dbconn.MariaDB && tgt.Maria != nil {
+		if plan.Mode == "batch" {
+			return prog, fmt.Errorf("%w: cursor batch memerlukan PostgreSQL", batch.ErrInvalidSpec)
+		}
+		revalidate := func(ctx context.Context) error {
+			if f, ok := w.Flow.(Revalidator); ok {
+				return f.Revalidate(ctx, j.RequestID.String(), j.Kind != jobs.KindRun || j.Hold != jobs.HoldNone)
+			}
+			return nil
+		}
+		return migration.RunWorkflowMaria(ctx, tgt, j.RootID, spec(j, plan).Op, plan.SQL, revalidate)
+	}
 	if tgt.DBMS != dbconn.PostgreSQL || tgt.Postgres == nil {
 		return prog, fmt.Errorf("%w: worker M2 hanya mendukung target PostgreSQL", batch.ErrInvalidSpec)
 	}
@@ -287,6 +346,14 @@ func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, l
 		p, err = r.Compensate(ctx, sp, report)
 	} else {
 		p, err = r.Run(ctx, sp, report)
+	}
+	if err != nil {
+		ectx, stop := context.WithTimeout(context.WithoutCancel(ctx), max(w.ReconcileWait, 3*time.Second))
+		evidence, _, proofErr := r.Evidence(ectx, sp)
+		stop()
+		if proofErr == nil && evidence.Batches > p.Batches {
+			p = evidence
+		}
 	}
 	if p.Batches < prog.Batches {
 		p.Batches, p.Rows = prog.Batches, prog.Rows
@@ -314,35 +381,42 @@ func holdFor(j *jobs.Job, prog batch.Progress, err error) (hold, attemptStatus s
 func (w *Worker) finish(ctx context.Context, j *jobs.Job, exec string, prog batch.Progress, runErr error, started time.Time, lost *atomic.Bool) {
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	if err := jobs.SetProgress(fctx, w.DB, j.ID, w.ID, prog.Batches, prog.Rows, prog.Total, jobs.HoldNone); errors.Is(err, jobs.ErrLeaseLost) {
-		return
+	status, hold, msg := "success", jobs.HoldNone, ""
+	if runErr != nil {
+		hold, status = holdFor(j, prog, runErr)
+		msg = runErr.Error()
 	}
-	if runErr == nil {
-		// Jika hasil tidak bisa dicatat, job dibiarkan: lease habis, worker berikutnya menutup attempt ini
-		// lalu menemukan bukti commit di target dan menyelesaikannya tanpa mengulang SQL.
-		if err := w.Flow.FinishAttempt(fctx, exec, "success", ""); err != nil {
-			slog.Error("gagal mencatat attempt", "event", "attempt.record_failed", "status", "error", "error", err.Error())
-			return
+	retried := false
+	err := w.completeAttempt(fctx, j, exec, status, msg, func(q jobs.Querier) error {
+		if err := jobs.SetProgress(fctx, q, j.ID, w.ID, prog.Batches, prog.Rows, prog.Total, hold); err != nil {
+			return err
 		}
-		if err := jobs.Succeed(fctx, w.DB, j.ID, w.ID); err == nil {
-			w.observeFinished("success", started)
-			telemetry.Event(ctx, slog.LevelInfo, "job.finished", "success", slog.Int64("committed_rows", prog.Rows), slog.Int64("committed_batches", prog.Batches))
+		if runErr == nil {
+			return jobs.Succeed(fctx, q, j.ID, w.ID)
 		}
-		return
-	}
-	hold, status := holdFor(j, prog, runErr)
-	if err := w.Flow.FinishAttempt(fctx, exec, status, runErr.Error()); err != nil {
-		slog.Error("gagal mencatat attempt", "event", "attempt.record_failed", "status", "error", "error", err.Error())
-		return
-	}
-	if ctx.Err() == nil && classify(runErr) == permanent {
-		if err := jobs.Fail(fctx, w.DB, j.ID, w.ID, hold, runErr.Error()); err == nil {
-			w.observeFinished("failed", started)
-			telemetry.Event(ctx, slog.LevelError, "job.finished", "failed", slog.String("hold", hold), slog.String("error", telemetry.RedactError(runErr)))
+		if ctx.Err() == nil && classify(runErr) == permanent {
+			return jobs.Fail(fctx, q, j.ID, w.ID, hold, msg)
 		}
+		var err error
+		retried, err = jobs.Retry(fctx, q, j, w.ID, hold, msg, w.backoff(j.RetryCount))
+		return err
+	})
+	if err != nil {
 		return
 	}
-	w.retry(ctx, j, hold, runErr, lost) // juga saat shutdown (ctx dibatalkan): job dilepas secepatnya
+	if retried {
+		if w.Metrics != nil {
+			w.Metrics.Retried()
+		}
+		telemetry.Event(ctx, slog.LevelWarn, "job.retry", "retry_wait", slog.Int("retry", j.RetryCount+1))
+		return
+	}
+	outcome := "success"
+	if runErr != nil {
+		outcome = "failed"
+	}
+	w.observeFinished(outcome, started)
+	telemetry.Event(ctx, slog.LevelInfo, "job.finished", outcome, slog.String("hold", hold))
 }
 
 // retry menjadwalkan ulang job, atau menandainya failed bila jatah retry habis. Dipanggil hanya
@@ -378,14 +452,14 @@ func (w *Worker) reject(ctx context.Context, j *jobs.Job, snap workflow.Plan, ca
 		hold, status = j.Hold, j.Hold
 	}
 	attemptNo := j.Attempt + 1
-	if exec, err := w.Flow.BeginAttempt(fctx, snap, strconv.FormatInt(j.ID, 10), attemptNo); err == nil {
-		if jobs.SetExecution(fctx, w.DB, j.ID, w.ID, exec, attemptNo) == nil {
-			w.Flow.FinishAttempt(fctx, exec, status, msg)
-		}
+	exec, err := w.beginAttempt(fctx, j, snap, attemptNo)
+	if err != nil {
+		return
 	}
-	if err := jobs.Fail(fctx, w.DB, j.ID, w.ID, hold, msg); err == nil && !lost.Load() {
-		telemetry.Event(ctx, slog.LevelWarn, "job.rejected", "failed", slog.String("error", msg))
+	if err := w.completeAttempt(fctx, j, exec, status, msg, func(q jobs.Querier) error { return jobs.Fail(fctx, q, j.ID, w.ID, hold, msg) }); err == nil && !lost.Load() {
+		telemetry.Event(ctx, slog.LevelWarn, "job.rejected", "failed")
 	}
+
 }
 
 func (w *Worker) observeFinished(outcome string, started time.Time) {

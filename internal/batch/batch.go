@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/sqlpolicy"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/telemetry"
 )
 
@@ -174,18 +175,29 @@ func (s *session) release() {
 }
 
 func validate(sp Spec) error {
-	if sp.RootID == 0 || (sp.Op != OpUp && sp.Op != OpDown) || sp.SQL == "" {
+	if sp.RootID <= 0 || (sp.Op != OpUp && sp.Op != OpDown) || sp.SQL == "" {
 		return fmt.Errorf("%w: root, op, dan sql wajib", ErrInvalidSpec)
+	}
+	if err := sqlpolicy.Check(sp.SQL); err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidSpec, err)
 	}
 	if sp.Size == 0 {
 		return nil
 	}
-	if sp.Size < 0 || !ident.MatchString(sp.Column) {
+	if sp.Size < 0 || sp.Size > 100000 || !ident.MatchString(sp.Column) {
 		return fmt.Errorf("%w: ukuran batch atau kolom cursor", ErrInvalidSpec)
 	}
 	_, err := table(sp.Table)
-	return err
+	if err != nil {
+		return err
+	}
+	if err := sqlpolicy.Batch(sp.SQL, sp.Table, sp.Column); err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidSpec, err)
+	}
+	return nil
 }
+
+func Validate(sp Spec) error { return validate(sp) }
 
 func table(name string) (string, error) {
 	parts := strings.Split(name, ".")
@@ -279,7 +291,7 @@ func (r *Runner) Evidence(ctx context.Context, sp Spec) (Progress, bool, error) 
 
 // Run menjalankan Spec sampai selesai atau gagal. Aman dipanggil ulang (retry, resume, duplicate
 // delivery): pekerjaan yang sudah committed tidak diulang karena bukti di target diperiksa lebih dulu.
-func (r *Runner) Run(ctx context.Context, sp Spec, report func(Progress)) (Progress, error) {
+func (r *Runner) Run(ctx context.Context, sp Spec, report func(Progress)) (progress Progress, runErr error) {
 	if err := validate(sp); err != nil {
 		return Progress{}, err
 	}
@@ -300,6 +312,24 @@ func (r *Runner) Run(ctx context.Context, sp Spec, report func(Progress)) (Progr
 	if err != nil {
 		return Progress{}, err
 	}
+	defer func() {
+		if runErr == nil {
+			return
+		}
+		proofCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cancel()
+		evidence, err := loadRun(proofCtx, s.conn, sp)
+		if err != nil {
+			if !errors.Is(runErr, ErrRolledBack) && !IsDefinite(runErr) && !errors.Is(runErr, ErrInvalidSpec) {
+				runErr = fmt.Errorf("%w: bukti target tidak dapat dibaca", ErrCommitUnknown)
+			}
+			return
+		}
+		p, err := totals(proofCtx, s.conn, sp, evidence)
+		if err == nil && p.Batches > progress.Batches {
+			progress = p
+		}
+	}()
 	if rn.finished {
 		return totals(ctx, s.conn, sp, rn)
 	}
@@ -314,7 +344,7 @@ func (r *Runner) begin(ctx context.Context, s *session) (pgx.Tx, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL statement_timeout = %d; SET LOCAL lock_timeout = %d`,
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL statement_timeout = %d; SET LOCAL lock_timeout = %d; SET LOCAL standard_conforming_strings = on`,
 		r.stmtTimeout().Milliseconds(), r.wait().Milliseconds())); err != nil {
 		tx.Rollback(context.WithoutCancel(ctx))
 		return nil, err
@@ -395,10 +425,12 @@ func (r *Runner) runNormal(ctx context.Context, s *session, sp Spec) (Progress, 
 }
 
 func (r *Runner) runBatches(ctx context.Context, s *session, sp Spec, rn run, report func(Progress)) (Progress, error) {
+	if err := validateCursor(ctx, s.conn, sp); err != nil {
+		return Progress{}, err
+	}
 	tbl, _ := table(sp.Table)
 	col := pgx.Identifier{sp.Column}.Sanitize()
 	if !rn.exists {
-		// Cakupan ditetapkan sekali sejak awal dan disimpan di target; baris baru setelah ini tidak ikut.
 		var maxID, count *int64
 		if err := s.conn.QueryRow(ctx, fmt.Sprintf(`SELECT max(%s), count(*) FROM %s`, col, tbl)).Scan(&maxID, &count); err != nil {
 			return Progress{}, err
@@ -435,6 +467,11 @@ func (r *Runner) runBatches(ctx context.Context, s *session, sp Spec, rn run, re
 		if err := ctx.Err(); err != nil {
 			return prog, err
 		}
+		if r.Revalidate != nil {
+			if err := r.Revalidate(ctx); err != nil {
+				return prog, err
+			}
+		}
 		var upper *int64
 		if err := s.conn.QueryRow(ctx, next, last, *rn.scopeMax, sp.Size).Scan(&upper); err != nil {
 			return prog, err
@@ -449,7 +486,28 @@ func (r *Runner) runBatches(ctx context.Context, s *session, sp Spec, rn run, re
 			span.End()
 			return prog, err
 		}
+		if _, err := tx.Exec(bctx, "LOCK TABLE "+tbl+" IN SHARE ROW EXCLUSIVE MODE"); err != nil {
+			tx.Rollback(context.WithoutCancel(bctx))
+			span.End()
+			return prog, err
+		}
+		if err := validateCursor(bctx, tx, sp); err != nil {
+			tx.Rollback(context.WithoutCancel(bctx))
+			span.End()
+			return prog, err
+		}
+		if err := tx.QueryRow(bctx, next, last, *rn.scopeMax, sp.Size).Scan(&upper); err != nil || upper == nil {
+			tx.Rollback(context.WithoutCancel(bctx))
+			span.End()
+			if err != nil {
+				return prog, err
+			}
+			continue
+		}
 		tag, err := tx.Exec(bctx, sp.SQL, last, *upper)
+		if err == nil && tag.RowsAffected() > int64(sp.Size) {
+			err = fmt.Errorf("%w: jumlah baris melampaui ukuran batch", ErrInvalidSpec)
+		}
 		if err == nil {
 			_, err = tx.Exec(bctx, `INSERT INTO _platform.migration_checkpoints (root_job, op, batch_no, cursor_from, cursor_to, rows_affected)
 				VALUES ($1, $2, $3, $4, $5, $6)`, sp.RootID, sp.Op, batchNo, last, *upper, tag.RowsAffected())
@@ -494,12 +552,16 @@ type span struct {
 // Setiap batch down adalah transaksi sendiri dengan checkpoint-nya sendiri, jadi kegagalan di tengah
 // jalan meninggalkan keadaan partially_reverted yang bisa dilanjutkan dengan memanggil Compensate lagi.
 func (r *Runner) Compensate(ctx context.Context, sp Spec, report func(Progress)) (Progress, error) {
-	sp.Op, sp.Size = OpDown, 1
-	if sp.Table == "" {
-		sp.Table = "x.x"
+	sp.Op = OpDown
+	if sp.Size <= 0 {
+		sp.Size = 100000
 	}
-	if sp.Column == "" {
-		sp.Column = "x"
+	if sp.Table == "" || sp.Column == "" {
+		var err error
+		sp.Table, sp.Column, err = sqlpolicy.BatchTarget(sp.SQL)
+		if err != nil {
+			return Progress{}, fmt.Errorf("%w: %s", ErrInvalidSpec, err)
+		}
 	}
 	if err := validate(sp); err != nil {
 		return Progress{}, err
@@ -558,6 +620,11 @@ func (r *Runner) Compensate(ctx context.Context, sp Spec, report func(Progress))
 		return prog, err
 	}
 	for _, b := range pending {
+		if r.Revalidate != nil {
+			if err := r.Revalidate(ctx); err != nil {
+				return prog, err
+			}
+		}
 		if err := ctx.Err(); err != nil {
 			return prog, err
 		}
@@ -565,7 +632,19 @@ func (r *Runner) Compensate(ctx context.Context, sp Spec, report func(Progress))
 		if err != nil {
 			return prog, err
 		}
+		tbl, _ := table(sp.Table)
+		if _, err := tx.Exec(ctx, "LOCK TABLE "+tbl+" IN SHARE ROW EXCLUSIVE MODE"); err != nil {
+			tx.Rollback(context.WithoutCancel(ctx))
+			return prog, err
+		}
+		if err := validateCursor(ctx, tx, sp); err != nil {
+			tx.Rollback(context.WithoutCancel(ctx))
+			return prog, err
+		}
 		tag, err := tx.Exec(ctx, sp.SQL, b.from, b.to)
+		if err == nil && tag.RowsAffected() > int64(sp.Size) {
+			err = fmt.Errorf("%w: kompensasi melampaui ukuran batch", ErrInvalidSpec)
+		}
 		if err == nil {
 			_, err = tx.Exec(ctx, `INSERT INTO _platform.migration_checkpoints (root_job, op, batch_no, cursor_from, cursor_to, rows_affected)
 				VALUES ($1, 'down', $2, $3, $4, $5)`, sp.RootID, b.no, b.from, b.to, tag.RowsAffected())

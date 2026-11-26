@@ -13,10 +13,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/authz"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/contracts"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/migration"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
 )
@@ -41,9 +43,12 @@ type Queue interface {
 }
 
 type Service struct {
-	DB    *pgxpool.Pool
-	Authz *authz.Authorizer
-	Queue Queue
+	DB      *pgxpool.Pool
+	Authz   *authz.Authorizer
+	Queue   Queue
+	Targets interface {
+		Target(context.Context, uuid.UUID) (*dbconn.Target, error)
+	}
 }
 
 var _ contracts.Workflow = (*Service)(nil)
@@ -173,6 +178,9 @@ func (s *Service) Get(ctx context.Context, _ reqctx.Principal, connID uuid.UUID,
 }
 
 func (s *Service) Save(ctx context.Context, p reqctx.Principal, connID uuid.UUID, mid string, d contracts.Draft) (contracts.Migration, error) {
+	if !s.canEdit(ctx, p, connID) {
+		return contracts.Migration{}, forbidden("Izin Edit diperlukan.")
+	}
 	if err := s.validateDraft(ctx, connID, &d); err != nil {
 		return contracts.Migration{}, err
 	}
@@ -330,31 +338,34 @@ func (s *Service) History(ctx context.Context, _ reqctx.Principal, connID uuid.U
 
 type request struct {
 	contracts.ChangeRequest
-	connID      uuid.UUID
-	migrationID int64
-	stored      string
-	createdBy   int64
-	queuedBy    *int64
-	upSQL       string
-	downSQL     string
-	irrev       bool
-	latestRev   string
+	connID        uuid.UUID
+	migrationID   int64
+	stored        string
+	createdBy     int64
+	queuedBy      *int64
+	upSQL         string
+	downSQL       string
+	irrev         bool
+	latestRev     string
+	targetMatches bool
 }
 
 const selectRequest = `
 	SELECT q.id::text, q.connection_id, q.migration_id, m.name, q.revision_id::text, q.action,
 	       coalesce(q.target_execution_id::text, ''), q.mode, q.batch_size, q.cursor_column, q.scope, q.status,
 	       q.created_by, q.queued_by, r.sql_up, r.sql_down, r.irreversible,
-	       (SELECT id::text FROM migration_revisions WHERE migration_id = q.migration_id ORDER BY number DESC LIMIT 1)
+	       (SELECT id::text FROM migration_revisions WHERE migration_id = q.migration_id ORDER BY number DESC LIMIT 1),
+ q.target_fingerprint = ` + targetFingerprint + `
 	FROM migration_requests q
 	JOIN migrations m ON m.id = q.migration_id
-	JOIN migration_revisions r ON r.id = q.revision_id`
+	JOIN migration_revisions r ON r.id = q.revision_id
+JOIN db_connections dc ON dc.id=q.connection_id`
 
 func scanRequest(row pgx.Row) (request, error) {
 	var x request
 	err := row.Scan(&x.ID, &x.connID, &x.migrationID, &x.MigrationName, &x.RevisionID, &x.Action,
 		&x.TargetExecutionID, &x.Mode, &x.BatchSize, &x.CursorColumn, &x.Scope, &x.stored,
-		&x.createdBy, &x.queuedBy, &x.upSQL, &x.downSQL, &x.irrev, &x.latestRev)
+		&x.createdBy, &x.queuedBy, &x.upSQL, &x.downSQL, &x.irrev, &x.latestRev, &x.targetMatches)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return x, migration.ErrNotFound
 	}
@@ -402,7 +413,7 @@ func evaluate(ctx context.Context, q querier, x *request) error {
 	if x.stored != "pending_review" {
 		return nil
 	}
-	if x.Action == "apply" && x.RevisionID != x.latestRev {
+	if !x.targetMatches || (x.Action == "apply" && x.RevisionID != x.latestRev) {
 		x.Status = "stale"
 		return nil
 	}
@@ -422,6 +433,12 @@ func evaluate(ctx context.Context, q querier, x *request) error {
 
 func validation(x request, pos position) []string {
 	var out []string
+	if !x.targetMatches {
+		out = append(out, "Konfigurasi target berubah; buat pengajuan baru untuk ditinjau.")
+	}
+	if err := validateBatchRequest(x); err != nil {
+		out = append(out, err.Error())
+	}
 	if x.Action == "apply" && x.RevisionID != x.latestRev {
 		out = append(out, "Revisi sudah diganti; ajukan ulang dengan revisi terbaru.")
 	}
@@ -445,7 +462,7 @@ func (s *Service) flags(ctx context.Context, p reqctx.Principal, x *request) {
 	x.CanSubmit = x.Status == "draft" && edit && valid
 	x.CanEnqueue = x.Status == "approved" && edit && valid
 	for _, a := range x.Approvals {
-		if a.LeaderID == p.UserID && (x.Status == "pending_review" || x.Status == "approved" || x.Status == "rejected") {
+		if a.LeaderID == p.UserID && (x.Status == "pending_review" || x.Status == "approved" || x.Status == "rejected" || x.Status == "queued") {
 			x.CanApprove = true
 		}
 	}
@@ -497,6 +514,9 @@ func (s *Service) Request(ctx context.Context, p reqctx.Principal, connID uuid.U
 }
 
 func (s *Service) Propose(ctx context.Context, p reqctx.Principal, connID uuid.UUID, in contracts.ChangeInput) (contracts.ChangeRequest, error) {
+	if !s.canEdit(ctx, p, connID) {
+		return contracts.ChangeRequest{}, forbidden("Izin Edit diperlukan.")
+	}
 	mid, err := parseMigrationID(in.MigrationID)
 	if err != nil {
 		return contracts.ChangeRequest{}, err
@@ -504,6 +524,15 @@ func (s *Service) Propose(ctx context.Context, p reqctx.Principal, connID uuid.U
 	rev, err := parseUUID(in.RevisionID)
 	if err != nil {
 		return contracts.ChangeRequest{}, migration.ValidationError("Revisi tidak valid.")
+	}
+	if in.Action != "apply" && in.Action != "rollback" && in.Action != "forward" {
+		return contracts.ChangeRequest{}, migration.ValidationError("Aksi tidak valid.")
+	}
+	if in.Mode == "" {
+		in.Mode = "normal"
+	}
+	if in.Mode != "normal" && in.Mode != "batch" {
+		return contracts.ChangeRequest{}, migration.ValidationError("Mode tidak valid.")
 	}
 	if in.Mode != "batch" {
 		in.Mode, in.BatchSize, in.CursorColumn = "normal", 0, ""
@@ -540,9 +569,24 @@ func (s *Service) Propose(ctx context.Context, p reqctx.Principal, connID uuid.U
 			}
 			target = &t
 		}
+		var up, down string
+		if err := tx.QueryRow(ctx, `SELECT sql_up,sql_down FROM migration_revisions WHERE id=$1`, rev).Scan(&up, &down); err != nil {
+			return err
+		}
+		x := request{ChangeRequest: contracts.ChangeRequest{ChangeInput: in}, upSQL: up, downSQL: down}
+		x.SQL = up
+		if in.Action == "rollback" {
+			x.SQL = down
+		}
+		if err := validateBatchRequest(x); err != nil {
+			return err
+		}
+		if err := s.validateTarget(ctx, connID, x); err != nil {
+			return err
+		}
 		return tx.QueryRow(ctx, `
-			INSERT INTO migration_requests (connection_id, migration_id, revision_id, action, target_execution_id, mode, batch_size, cursor_column, scope, created_by)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id::text`,
+			INSERT INTO migration_requests (connection_id, migration_id, revision_id, action, target_execution_id, mode, batch_size, cursor_column, scope, created_by, target_fingerprint)
+ SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10, `+targetFingerprint+` FROM db_connections dc WHERE dc.id=$1 RETURNING id::text`,
 			connID, mid, rev, in.Action, target, in.Mode, in.BatchSize, strings.TrimSpace(in.CursorColumn), in.Scope, p.UserID).Scan(&id)
 	})
 	if err != nil {
@@ -563,6 +607,12 @@ func (s *Service) Submit(ctx context.Context, p reqctx.Principal, connID uuid.UU
 		if len(x.Validation) > 0 {
 			return migration.ValidationError(strings.Join(x.Validation, " "))
 		}
+		if !s.canEdit(ctx, p, connID) {
+			return forbidden("Izin Edit diperlukan.")
+		}
+		if err := s.validateTarget(ctx, connID, x); err != nil {
+			return err
+		}
 		_, err = tx.Exec(ctx, `UPDATE migration_requests SET status = 'pending_review', submitted_at = now() WHERE id = $1`, x.ID)
 		return err
 	})
@@ -578,8 +628,22 @@ func (s *Service) Review(ctx context.Context, p reqctx.Principal, connID uuid.UU
 		if err != nil {
 			return err
 		}
-		if x.stored != "pending_review" || x.Status == "stale" {
+		if (x.stored != "pending_review" && x.stored != "queued") || x.Status == "stale" {
 			return conflict("Pengajuan tidak sedang menunggu review.")
+		}
+		if f.Decision != "approve" && f.Decision != "reject" || utf8.RuneCountInString(f.Comment) > 4000 {
+			return migration.ValidationError("Keputusan review tidak valid.")
+		}
+		if f.Decision == "approve" {
+			if err := validateBatchRequest(x); err != nil {
+				return err
+			}
+			if x.stored != "queued" && len(x.Validation) > 0 {
+				return migration.ValidationError(strings.Join(x.Validation, " "))
+			}
+			if err := s.validateTarget(ctx, connID, x); err != nil {
+				return err
+			}
 		}
 		led := 0
 		for _, a := range x.Approvals {
@@ -615,6 +679,9 @@ func (s *Service) Enqueue(ctx context.Context, p reqctx.Principal, connID uuid.U
 	if s.Queue == nil {
 		return contracts.Job{}, &contracts.Error{Status: 503, Code: "module_unavailable", Message: "Layanan queue dan worker belum tersedia."}
 	}
+	if !s.canEdit(ctx, p, connID) {
+		return contracts.Job{}, forbidden("Izin Edit diperlukan.")
+	}
 	var job contracts.Job
 	err := pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT 1 FROM db_connections WHERE id = $1 FOR UPDATE`, connID); err != nil {
@@ -633,6 +700,9 @@ func (s *Service) Enqueue(ctx context.Context, p reqctx.Principal, connID uuid.U
 		}
 		if len(x.Validation) > 0 {
 			return conflict(strings.Join(x.Validation, " "))
+		}
+		if err := s.validateTarget(ctx, connID, x); err != nil {
+			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE migration_requests SET status = 'queued', queued_by = $2, queued_at = now() WHERE id = $1`, x.ID, p.UserID); err != nil {
 			return err
@@ -662,6 +732,9 @@ func (s *Service) Prepare(ctx context.Context, requestID string) (Plan, error) {
 	if x.Status != "approved" {
 		return Plan{}, conflict("Approval tidak lagi sah (revisi, leader, atau grant berubah).")
 	}
+	if err := s.validateTarget(ctx, x.connID, x); err != nil {
+		return Plan{}, err
+	}
 	if len(x.Validation) > 0 {
 		return Plan{}, conflict(strings.Join(x.Validation, " "))
 	}
@@ -673,12 +746,18 @@ func (s *Service) Prepare(ctx context.Context, requestID string) (Plan, error) {
 }
 
 func (s *Service) BeginAttempt(ctx context.Context, pl Plan, jobID string, attemptNo int) (string, error) {
+	return beginAttempt(ctx, s.DB, pl, jobID, attemptNo)
+}
+
+func beginAttempt(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, pl Plan, jobID string, attemptNo int) (string, error) {
 	var reverts *string
 	if pl.Action == "rollback" {
 		reverts = &pl.TargetExecutionID
 	}
 	var id string
-	err := s.DB.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		INSERT INTO migration_executions (connection_id, migration_id, revision_id, request_id, job_id, action, attempt, status, sql, reverts_execution_id, actor_id)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8,$9,$10) RETURNING id::text`,
 		pl.ConnectionID, pl.MigrationID, pl.RevisionID, pl.RequestID, jobID, pl.Action, attemptNo, pl.SQL, reverts, pl.ActorID).Scan(&id)
@@ -688,6 +767,13 @@ func (s *Service) BeginAttempt(ctx context.Context, pl Plan, jobID string, attem
 var finalStatus = map[string]bool{"success": true, "failed": true, "commit_unknown": true, "partial": true, "partially_reverted": true}
 
 func (s *Service) FinishAttempt(ctx context.Context, executionID, status, errMsg string) error {
+	return finishAttempt(ctx, s.DB, executionID, status, errMsg)
+}
+
+func finishAttempt(ctx context.Context, q interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, executionID, status, errMsg string) error {
 	if !finalStatus[status] {
 		return fmt.Errorf("workflow: status attempt tidak dikenal: %q", status)
 	}
@@ -699,14 +785,14 @@ func (s *Service) FinishAttempt(ctx context.Context, executionID, status, errMsg
 	if errMsg != "" {
 		msg = &errMsg
 	}
-	tag, err := s.DB.Exec(ctx, `
+	tag, err := q.Exec(ctx, `
 		UPDATE migration_executions SET status = $2, error_message = $3, finished_at = $4
 		WHERE id = $1 AND status NOT IN ('success','failed') AND status <> $2`, id, status, msg, time.Now())
 	if err != nil || tag.RowsAffected() == 1 {
 		return err
 	}
 	var current string
-	if err := s.DB.QueryRow(ctx, `SELECT status FROM migration_executions WHERE id = $1`, id).Scan(&current); err != nil {
+	if err := q.QueryRow(ctx, `SELECT status FROM migration_executions WHERE id = $1`, id).Scan(&current); err != nil {
 		return err
 	}
 	if current != status {

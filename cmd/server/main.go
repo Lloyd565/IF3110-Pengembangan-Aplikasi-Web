@@ -22,10 +22,10 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/httpx"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/jobs"
-	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/telemetry"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/migration"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/observability"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/platformdb"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/telemetry"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/user"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/workflow"
 )
@@ -103,7 +103,7 @@ func main() {
 		Authz:        &authz.Authorizer{DB: pool},
 		Conns:        conns,
 	}
-	srv.Workflow = &workflow.Service{DB: pool, Authz: srv.Authz, Queue: jobs.Queue{}}
+	srv.Workflow = &workflow.Service{DB: pool, Authz: srv.Authz, Queue: jobs.Queue{}, Targets: conns}
 	srv.Jobs = &jobs.Service{DB: pool, Authz: srv.Authz, Flow: srv.Workflow}
 	srv.Leaders = &workflow.Leaders{DB: pool}
 	srv.Admin = &admin.Service{

@@ -37,6 +37,9 @@ func (s *Service) PrepareRecovery(ctx context.Context, requestID string) (Plan, 
 	if x.Status != "approved" {
 		return Plan{}, conflict("Approval tidak lagi sah (revisi, leader, atau grant berubah).")
 	}
+	if err := s.validateTarget(ctx, x.connID, x); err != nil {
+		return Plan{}, err
+	}
 	actor := reqctx.Principal{UserID: *x.queuedBy}
 	if !s.canEdit(ctx, actor, x.connID) {
 		return Plan{}, forbidden("Pengguna yang mengirim ke queue tidak lagi memiliki izin eksekusi.")

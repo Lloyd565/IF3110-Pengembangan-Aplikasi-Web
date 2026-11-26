@@ -11,6 +11,7 @@ import (
 
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/admin"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/auth"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/batch"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/contracts"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/explorer"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/migration"
@@ -78,6 +79,8 @@ func apiFailure(w http.ResponseWriter, err error) {
 		apiError(w, 404, "not_found", "Data tidak ditemukan.")
 	case errors.Is(err, migration.ErrNotDraft):
 		apiError(w, 409, "immutable", "Migration yang pernah dieksekusi tidak dapat diubah.")
+	case errors.Is(err, batch.ErrInvalidSpec):
+		apiError(w, 422, "validation", "Konfigurasi batch tidak valid.")
 	case errors.As(err, &invalid):
 		apiError(w, 422, "validation", invalid.Error())
 	case errors.Is(err, auth.ErrInvalidSession):
