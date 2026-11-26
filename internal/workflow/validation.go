@@ -11,6 +11,7 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/batch"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/migration"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/sqlpolicy"
 )
 
 func validateBatchRequest(x request) error {
@@ -25,6 +26,13 @@ func validateBatchRequest(x request) error {
 	}
 	if err := batch.Validate(batch.Spec{RootID: 1, Op: batch.OpUp, SQL: x.SQL, Size: x.BatchSize, Table: x.Scope, Column: x.CursorColumn}); err != nil {
 		return migration.ValidationError(err.Error())
+	}
+	if x.Action != "rollback" {
+		// Kompensasi batch hanya bisa mengembalikan baris yang tercatat di manifest, dan manifest hanya
+		// direkam untuk UPDATE. DELETE/INSERT batch akan lolos jalan tapi tidak pernah bisa dikompensasi.
+		if _, tracked, err := sqlpolicy.BatchReplay(x.SQL, x.CursorColumn, false); err != nil || !tracked {
+			return migration.ValidationError("Mode batch hanya mendukung UPDATE, karena hanya baris UPDATE yang dicatat sehingga bisa dikompensasi.")
+		}
 	}
 	if x.Action != "rollback" && strings.TrimSpace(x.downSQL) != "" {
 		if err := batch.Validate(batch.Spec{RootID: 1, Op: batch.OpDown, SQL: x.downSQL, Size: x.BatchSize, Table: x.Scope, Column: x.CursorColumn}); err != nil {

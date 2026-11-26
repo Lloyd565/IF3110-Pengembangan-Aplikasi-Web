@@ -243,6 +243,28 @@ func TestQueueEnqueueOncePerRequest(t *testing.T) {
 	}
 }
 
+// BUG-02: kompensasi yang tertahan commit_unknown harus tetap punya jalur pemulihan.
+func TestStuckJobsAlwaysHaveARecoveryPath(t *testing.T) {
+	for _, c := range []struct {
+		kind, hold         string
+		resume, compensate bool
+	}{
+		{KindRun, HoldCommitUnknown, true, false},            // apply tidak pasti: resume membaca bukti dulu
+		{KindRun, HoldPartial, true, true},                   // apply sebagian: lanjutkan atau batalkan
+		{KindCompensate, HoldPartiallyReverted, false, true}, // kompensasi sebagian: lanjutkan kompensasi
+		{KindCompensate, HoldCommitUnknown, false, true},     // kompensasi tidak pasti: kompensasi lagi
+		{KindResume, HoldCommitUnknown, true, false},
+	} {
+		out := Public(&Job{Kind: c.kind, Status: StatusFailed, Hold: c.hold, Plan: json.RawMessage(`{}`)})
+		if out.CanResume != c.resume || out.CanCompensate != c.compensate {
+			t.Errorf("%s/%s: resume=%v compensate=%v, mau %v %v", c.kind, c.hold, out.CanResume, out.CanCompensate, c.resume, c.compensate)
+		}
+		if !out.CanResume && !out.CanCompensate {
+			t.Errorf("%s/%s: job tertahan tanpa jalur pemulihan", c.kind, c.hold)
+		}
+	}
+}
+
 func TestPublicStatusMapping(t *testing.T) {
 	cases := []struct {
 		status, hold, want string
@@ -262,5 +284,65 @@ func TestPublicStatusMapping(t *testing.T) {
 			t.Errorf("%s/%s: status=%s resume=%v compensate=%v, mau %s %v %v", c.status, c.hold,
 				out.Status, out.CanResume, out.CanCompensate, c.want, c.resume, c.compensate)
 		}
+	}
+}
+
+// Job yang memulihkan attempt-nya (attempt_open/commit_unknown) harus jalan sebelum job lain pada
+// target yang sama, termasuk job retry_wait yang sudah jatuh tempo, bukan hanya job queued.
+func TestRecoveringJobBlocksRetryWaitAndQueuedJobs(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	rec, waiting, queued, other := enqueue(t, db, connA, "rec"), enqueue(t, db, connA, "wait"), enqueue(t, db, connA, "q"), enqueue(t, db, connB, "b")
+	set := func(id int64, sql string) {
+		t.Helper()
+		if _, err := db.Exec(ctx, `UPDATE jobs SET `+sql+` WHERE id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set(rec, `status='retry_wait', attempt_open=true, next_retry_at=now()+interval '1 hour'`)
+	set(waiting, `status='retry_wait', next_retry_at=now()-interval '1 second'`)
+	set(other, `status='retry_wait', next_retry_at=now()-interval '1 second'`)
+
+	// Database lain tidak ikut tertahan.
+	if j, err := Claim(ctx, db, "w", time.Minute); err != nil || j == nil || j.ID != other {
+		t.Fatalf("job database lain harus tetap bisa diklaim: %+v err=%v", j, err)
+	}
+	if j, err := Claim(ctx, db, "w", time.Minute); err != nil || j != nil {
+		t.Fatalf("retry_wait/queued tidak boleh mendahului pemulihan job %d: dapat %+v err=%v", rec, j, err)
+	}
+	set(rec, `next_retry_at=now()-interval '1 second'`)
+	if j, err := Claim(ctx, db, "w", time.Minute); err != nil || j == nil || j.ID != rec {
+		t.Fatalf("job pemulihan harus diklaim lebih dulu: %+v err=%v", j, err)
+	}
+	if err := Succeed(ctx, db, rec, "w"); err != nil {
+		t.Fatal(err)
+	}
+	if j, err := Claim(ctx, db, "w", time.Minute); err != nil || j == nil || j.ID != waiting {
+		t.Fatalf("setelah pemulihan selesai, retry_wait berikutnya boleh jalan: %+v err=%v", j, err)
+	}
+	_ = queued
+}
+
+// Dua job pemulihan pada target yang sama tidak boleh saling menunggu: id terkecil jalan dulu.
+func TestTwoRecoveringJobsDoNotDeadlock(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	first, second := enqueue(t, db, connA, "r1"), enqueue(t, db, connA, "r2")
+	if _, err := db.Exec(ctx, `UPDATE jobs SET status='retry_wait', next_retry_at=now()-interval '1 second', attempt_open = (id = $1),
+		hold = CASE WHEN id = $2 THEN 'commit_unknown' ELSE hold END`, first, second); err != nil {
+		t.Fatal(err)
+	}
+	j, err := Claim(ctx, db, "w", time.Minute)
+	if err != nil || j == nil || j.ID != first {
+		t.Fatalf("pemulihan dengan id terkecil harus jalan dulu: %+v err=%v", j, err)
+	}
+	if j, err := Claim(ctx, db, "w2", time.Minute); err != nil || j != nil {
+		t.Fatalf("pemulihan kedua menunggu yang pertama: %+v err=%v", j, err)
+	}
+	if err := Succeed(ctx, db, first, "w"); err != nil {
+		t.Fatal(err)
+	}
+	if j, err := Claim(ctx, db, "w2", time.Minute); err != nil || j == nil || j.ID != second {
+		t.Fatalf("pemulihan kedua harus jalan setelah yang pertama: %+v err=%v", j, err)
 	}
 }

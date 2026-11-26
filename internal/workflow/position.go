@@ -81,7 +81,7 @@ func top(stack []int64) int64 {
 }
 
 func (p position) check(action string, migrationID int64, target string) string {
-	if action == "rollback" && p.blockedID != "" && p.blockedID == target && (p.blockedStatus == "partial" || p.blockedStatus == "partially_reverted") {
+	if action == "rollback" && p.blockedID != "" && p.blockedID == target && (p.blockedStatus == "partial" || p.blockedStatus == "partially_reverted" || p.blockedStatus == "commit_unknown") {
 		return ""
 	}
 	if p.blocked != "" {

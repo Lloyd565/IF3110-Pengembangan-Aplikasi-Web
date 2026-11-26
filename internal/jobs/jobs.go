@@ -176,15 +176,20 @@ func Claim(ctx context.Context, db *pgxpool.Pool, workerID string, lease time.Du
 	var id int64
 	var conn uuid.UUID
 	var previous, target string
+	var recovering bool
+	// Job yang sedang memulihkan attempt-nya (attempt_open/commit_unknown) menahan semua job lain yang
+	// belum berjalan di target yang sama, termasuk yang retry_wait. Antar sesama job pemulihan, id
+	// terkecil jalan lebih dulu, jadi tidak ada yang saling menunggu.
 	err = tx.QueryRow(ctx, `
-		SELECT id,connection_id,status,coalesce(nullif(plan->>'TargetServer',''),connection_id::text) FROM jobs j
+		SELECT id,connection_id,status,coalesce(nullif(plan->>'TargetServer',''),connection_id::text),(attempt_open OR hold='commit_unknown') FROM jobs j
 		WHERE (status = 'queued'
 		       OR (status = 'retry_wait' AND next_retry_at <= now())
 		       OR (status = 'running' AND lease_until < now()))
 		  AND NOT EXISTS (SELECT 1 FROM jobs o WHERE (o.connection_id=j.connection_id OR (j.plan->>'TargetServer'<>'' AND j.plan->>'TargetServer'=o.plan->>'TargetServer')) AND o.id <> j.id
 		                  AND (o.status = 'running' AND (o.lease_until > clock_timestamp() OR j.status <> 'running' OR o.id < j.id)
-                            OR o.status = 'retry_wait' AND (o.attempt_open OR o.hold='commit_unknown') AND j.status='queued'))
-		ORDER BY (status = 'running' OR attempt_open) DESC, id FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&id, &conn, &previous, &target)
+                            OR o.status = 'retry_wait' AND (o.attempt_open OR o.hold='commit_unknown') AND j.status <> 'running'
+                               AND NOT ((j.attempt_open OR j.hold='commit_unknown') AND j.id < o.id)))
+		ORDER BY (status = 'running' OR attempt_open) DESC, id FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&id, &conn, &previous, &target, &recovering)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -199,7 +204,7 @@ func Claim(ctx context.Context, db *pgxpool.Pool, workerID string, lease time.Du
 	var busy bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM jobs WHERE (connection_id=$1 OR plan->>'TargetServer'=$4) AND id <> $2
 		AND (status = 'running' AND (lease_until > clock_timestamp() OR $3 <> 'running' OR id < $2)
-       OR status = 'retry_wait' AND (attempt_open OR hold='commit_unknown') AND $3='queued'))`, conn, id, previous, target).Scan(&busy); err != nil {
+       OR status = 'retry_wait' AND (attempt_open OR hold='commit_unknown') AND $3 <> 'running' AND NOT ($5 AND $2 < id)))`, conn, id, previous, target, recovering).Scan(&busy); err != nil {
 		return nil, err
 	}
 	if busy {

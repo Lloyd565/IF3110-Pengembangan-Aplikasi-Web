@@ -30,7 +30,7 @@ func (q Queue) Enqueue(ctx context.Context, tx pgx.Tx, plan workflow.Plan, key s
 	kind, parent := KindRun, (*int64)(nil)
 	if plan.Action == "rollback" && plan.TargetExecutionID != "" {
 		var jid *string
-		err := tx.QueryRow(ctx, `SELECT job_id FROM migration_executions WHERE id = $1::uuid AND (status IN ('partial','partially_reverted') OR (status='success' AND $2='batch'))`,
+		err := tx.QueryRow(ctx, `SELECT job_id FROM migration_executions WHERE id = $1::uuid AND (status IN ('partial','partially_reverted','commit_unknown') OR (status='success' AND $2='batch'))`,
 			plan.TargetExecutionID, plan.Mode).Scan(&jid)
 		if err != nil && err != pgx.ErrNoRows {
 			return contracts.Job{}, err
@@ -93,9 +93,12 @@ func Public(j *Job) contracts.Job {
 		CommittedRows: j.CommittedRows, CommittedBatches: j.CommittedBatches, TotalRows: j.TotalRows,
 		Attempt: j.Attempt, LastError: j.Error,
 		// commit_unknown dipulihkan lewat resume: worker membaca bukti di target lebih dulu, baru melanjutkan.
-		CanResume:     j.Status == StatusFailed && (j.Hold == HoldPartial || j.Hold == HoldCommitUnknown) && j.Kind != KindCompensate,
-		CanCompensate: j.Status == StatusFailed && (j.Hold == HoldPartial || j.Hold == HoldPartiallyReverted),
-		UpdatedAt:     j.UpdatedAt,
+		CanResume: j.Status == StatusFailed && (j.Hold == HoldPartial || j.Hold == HoldCommitUnknown) && j.Kind != KindCompensate,
+		// Kompensasi yang tertahan commit_unknown dilanjutkan dengan kompensasi lagi: setiap batch down
+		// diperiksa dari checkpoint di target dulu, jadi batch yang ternyata committed tidak diulang.
+		CanCompensate: j.Status == StatusFailed && (j.Hold == HoldPartial || j.Hold == HoldPartiallyReverted ||
+			(j.Hold == HoldCommitUnknown && j.Kind == KindCompensate)),
+		UpdatedAt: j.UpdatedAt,
 	}
 }
 

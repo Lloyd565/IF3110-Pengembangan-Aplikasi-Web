@@ -306,3 +306,44 @@ func TestLegacyBackfill(t *testing.T) {
 		t.Fatalf("digest backfill %s != %s", dbDigest, want)
 	}
 }
+
+// Upgrade 0007: execution era M1 (tanpa job worker) tetap bisa di-rollback. Execution worker yang
+// identitas targetnya kosong hanya bisa berasal dari build antara yang belum rilis; tanpa bukti
+// identitas, rollback/forward ditolak dengan jelas alih-alih menebak target.
+func TestLegacyExecutionIdentityOnUpgrade(t *testing.T) {
+	s, _, db := setup(t, "workflow_legacy_identity")
+	ctx := context.Background()
+	m := must[contracts.Migration](t)(s.Save(ctx, carol, conn, "", contracts.Draft{Name: "t", SQLUp: "CREATE TABLE t (id int)", SQLDown: "DROP TABLE t"}))
+	ap := approveAll(t, s, contracts.ChangeInput{MigrationID: m.ID, RevisionID: m.RevisionID, Action: "apply"}, alice, bob)
+	must[contracts.Job](t)(s.Enqueue(ctx, carol, conn, ap.ID, "key-legacy"))
+	e := run(t, s, ap.ID, "success")
+	// Simulasi baris sebelum 0007: identitas target kosong. Guard trigger dimatikan seperti di 0007.
+	legacy := func(job any) {
+		t.Helper()
+		err := pgx.BeginFunc(ctx, db, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `ALTER TABLE migration_executions DISABLE TRIGGER migration_executions_guard`); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE migration_executions SET target_identity = '', target_server = '', job_id = $2 WHERE id = $1`, e[0], job); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `ALTER TABLE migration_executions ENABLE TRIGGER migration_executions_guard`)
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	in := contracts.ChangeInput{MigrationID: m.ID, RevisionID: m.RevisionID, Action: "rollback", TargetExecutionID: e[0]}
+
+	legacy("123")
+	if _, err := s.Propose(ctx, carol, conn, in); err == nil || status(t, err) != 409 {
+		t.Fatalf("execution worker tanpa identitas harus ditolak 409: %v", err)
+	}
+
+	legacy(nil)
+	x, err := s.Propose(ctx, carol, conn, in)
+	if err != nil || x.TargetExecutionID != e[0] {
+		t.Fatalf("execution era M1 harus tetap bisa di-rollback setelah upgrade: %+v err=%v", x, err)
+	}
+}

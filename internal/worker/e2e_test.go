@@ -357,6 +357,112 @@ func TestEndToEndResumeFinishesRemainingBatchesOnly(t *testing.T) {
 	}
 }
 
+func (e *e2e) submitApproved(id string) contracts.ChangeRequest {
+	ctx := context.Background()
+	_, err := e.svc.Submit(ctx, carol, connA, id)
+	e.must(err)
+	var x contracts.ChangeRequest
+	for _, l := range []reqctx.Principal{alice, bob} {
+		x, err = e.svc.Review(ctx, l, connA, id, contracts.Review{Decision: "approve"})
+		e.must(err)
+	}
+	return x
+}
+
+// BUG-02 dengan database nyata: kompensasi yang tertahan commit_unknown harus bisa dipulihkan lewat
+// kompensasi lanjutan (dengan approval baru), tanpa mengulang batch down yang sudah committed.
+func TestEndToEndCompensationStuckInCommitUnknownIsRecoverable(t *testing.T) {
+	e := newE2E(t, "e2e_comp_unknown")
+	ctx := context.Background()
+	m := e.save(upSQL, downSQL)
+	e.w.Hooks.BeforeCommit = func(op string, n int) error {
+		if op == "up" && n == 4 {
+			return errors.New("gangguan terus-menerus")
+		}
+		return nil
+	}
+	apply := e.enqueue(e.approved(batchInput(m, "apply", "")))
+	e.drain()
+	if got := e.job(apply.ID); got.Status != "partial" || got.CommittedBatches != 3 {
+		t.Fatalf("prasyarat: apply harus partial 3 batch: %+v", got)
+	}
+
+	req, err := e.js.Recover(ctx, carol, connA, apply.ID, "compensate", "k-comp-1")
+	e.must(err)
+	req = e.submitApproved(req.ID)
+	// koneksi kompensasi diputus di batch down kedua dan target tidak bisa dikunci: hasil commit tidak pasti.
+	var holder *pgxpool.Conn
+	var released bool
+	release := func() {
+		if holder != nil && !released {
+			released = true
+			holder.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtext('if3110.migration'))`)
+			holder.Release()
+		}
+	}
+	e.w.Hooks.BeforeCommit = func(op string, n int) error {
+		if op == "down" && n == 2 && holder == nil {
+			e.target.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+				WHERE datname = current_database() AND pid <> pg_backend_pid() AND state = 'idle in transaction'`)
+			time.Sleep(150 * time.Millisecond)
+			var err error
+			if holder, err = e.target.Acquire(ctx); err != nil {
+				t.Fatal(err)
+			}
+			holder.Exec(ctx, `SELECT pg_advisory_lock(hashtext('if3110.migration'))`)
+			// Lepas juga saat test gagal lebih awal; kalau tidak, penutupan pool menunggu selamanya.
+			t.Cleanup(release)
+		}
+		return nil
+	}
+	comp := e.enqueue(req)
+	e.drain()
+	if holder == nil {
+		t.Fatal("prasyarat: kegagalan koneksi tidak terpicu")
+	}
+	stuck := e.job(comp.ID)
+	if stuck.Status != "commit_unknown" || stuck.CanResume || !stuck.CanCompensate {
+		t.Fatalf("kompensasi commit_unknown harus punya jalur kompensasi lanjutan: %+v", stuck)
+	}
+
+	// target kembali bisa dikunci; kompensasi lanjutan wajib disetujui lagi.
+	release()
+	e.w.Hooks.BeforeCommit = nil
+	next, err := e.js.Recover(ctx, carol, connA, comp.ID, "compensate", "k-comp-2")
+	e.must(err)
+	if next.TargetExecutionID != stuck.ExecutionID {
+		t.Fatalf("kompensasi lanjutan harus menargetkan attempt yang tertahan: %s, mau %s", next.TargetExecutionID, stuck.ExecutionID)
+	}
+	if _, err := e.svc.Enqueue(ctx, alice, connA, next.ID, "key-tanpa-approval-2"); err == nil {
+		t.Fatal("kompensasi lanjutan tidak boleh masuk queue sebelum disetujui")
+	}
+	next = e.submitApproved(next.ID)
+	if next.Status != "approved" || len(next.Validation) != 0 {
+		t.Fatalf("setelah approval kompensasi lanjutan harus bisa di-enqueue: %+v", next)
+	}
+	cont := e.enqueue(next)
+	var kind string
+	var root, applyRoot int64
+	e.must(e.db.QueryRow(ctx, `SELECT kind, root_job_id FROM jobs WHERE id = $1::bigint`, cont.ID).Scan(&kind, &root))
+	e.must(e.db.QueryRow(ctx, `SELECT root_job_id FROM jobs WHERE id = $1::bigint`, apply.ID).Scan(&applyRoot))
+	if kind != "compensate" || root != applyRoot {
+		t.Fatalf("job lanjutan harus kompensasi pada root apply yang sama: kind=%s root=%d mau %d", kind, root, applyRoot)
+	}
+	e.drain()
+	if got := e.job(cont.ID); got.Status != "success" {
+		t.Fatalf("kompensasi lanjutan: %+v", got)
+	}
+	if e.bal() != "map[100:1000]" {
+		t.Fatalf("seluruh batch harus kembali tepat sekali: %s", e.bal())
+	}
+	other := e.save("SELECT 1", "SELECT 2")
+	free, err := e.svc.Propose(ctx, carol, connA, contracts.ChangeInput{MigrationID: other.ID, RevisionID: other.RevisionID, Action: "apply", Mode: "normal"})
+	e.must(err)
+	if len(free.Validation) != 0 {
+		t.Fatalf("setelah pemulihan selesai migration lain tidak boleh tertahan: %+v", free.Validation)
+	}
+}
+
 func TestEndToEndJobsAPIScopesToConnection(t *testing.T) {
 	e := newE2E(t, "e2e_scope")
 	m := e.save(upSQL, downSQL)
