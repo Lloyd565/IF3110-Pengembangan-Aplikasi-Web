@@ -63,11 +63,12 @@ func Compare(current, desired Snapshot) (Plan, error) {
 			}
 		}
 	}
-	if len(p.Changes) == 0 {
-		return p, nil
-	}
+	additiveOnly := plainColumnAdditions(old, next)
 	for _, snapshot := range []Snapshot{current, desired} {
 		for _, t := range snapshot.Tables {
+			if additiveOnly && same(old[t.Name], next[t.Name]) {
+				continue
+			}
 			for _, reason := range t.Manual {
 				p.manual(t.Name, reason)
 			}
@@ -172,6 +173,11 @@ func Compare(current, desired Snapshot) (Plan, error) {
 			q += " ENGINE=InnoDB DEFAULT CHARACTER SET " + quote(kind, b.Charset) + " COLLATE " + quote(kind, b.Collation)
 		}
 		p.step("Buat tabel "+name, q)
+		if kind == dbconn.PostgreSQL {
+			for _, c := range b.Columns {
+				applySerialOverride(&p, current.Schema, name, c)
+			}
+		}
 	}
 	if kind == dbconn.PostgreSQL {
 		for _, name := range all {
@@ -240,6 +246,7 @@ func alterPostgres(p *Plan, schema string, a, b Table) {
 		old, had := ac[c.Name]
 		if !had {
 			p.step("Tambah kolom "+a.Name+"."+c.Name, "ALTER TABLE "+table+" ADD COLUMN "+columnSQL(kind, c))
+			applySerialOverride(p, schema, a.Name, c)
 			continue
 		}
 		if old.Auto != c.Auto || (old.Type != c.Type && (old.Auto != "" || c.Auto != "")) {
@@ -254,10 +261,16 @@ func alterPostgres(p *Plan, schema string, a, b Table) {
 			p.step("Ubah tipe "+c.Name, prefix+"TYPE "+c.Type)
 			p.Warnings = append(p.Warnings, a.Name+"."+c.Name+": periksa cast dan data yang sudah ada sebelum mengeksekusi perubahan tipe.")
 		}
-		if old.Default != c.Default || old.Type != c.Type {
-			if c.Default != "" {
+		if old.Default != c.Default || old.Type != c.Type || old.SerialDefaultOverride != c.SerialDefaultOverride {
+			if c.Auto == "serial" && !c.SerialDefaultOverride {
+				if old.Sequence == "" {
+					p.manual(a.Name+"."+c.Name, "sequence milik kolom aktif tidak tersedia")
+					continue
+				}
+				p.step("Pulihkan default sequence "+c.Name, prefix+"SET DEFAULT nextval(E"+mariaLiteral(old.Sequence)+"::regclass)")
+			} else if c.Default != "" {
 				p.step("Ubah default "+c.Name, prefix+"SET DEFAULT "+c.Default)
-			} else if old.Default != "" && old.Type == c.Type {
+			} else if (old.Default != "" || old.Auto == "serial") && old.Type == c.Type {
 				p.step("Hapus default "+c.Name, prefix+"DROP DEFAULT")
 			}
 		}
@@ -493,6 +506,9 @@ func constraintSQL(kind dbconn.DBMS, schema string, c Constraint) string {
 			q += " NULLS NOT DISTINCT"
 		}
 		q += " (" + names(kind, c.Columns) + ")"
+		if kind == dbconn.PostgreSQL && len(c.Include) > 0 {
+			q += " INCLUDE (" + names(kind, c.Include) + ")"
+		}
 	case "CHECK":
 		q += " (" + c.Check + ")"
 		if kind == dbconn.PostgreSQL && c.NoInherit {
@@ -653,4 +669,45 @@ func dedup(items []string) []string {
 		}
 	}
 	return out
+}
+
+func applySerialOverride(p *Plan, schema, table string, c Column) {
+	if c.Auto != "serial" || !c.SerialDefaultOverride {
+		return
+	}
+	action := "DROP DEFAULT"
+	if c.Default != "" {
+		action = "SET DEFAULT " + c.Default
+	}
+	p.step("Atur default "+table+"."+c.Name, "ALTER TABLE "+qualified(dbconn.PostgreSQL, schema, table)+" ALTER COLUMN "+quote(dbconn.PostgreSQL, c.Name)+" "+action)
+}
+
+func plainColumnAdditions(old, next map[string]Table) bool {
+	if len(old) != len(next) {
+		return false
+	}
+	added := false
+	for name, a := range old {
+		b, ok := next[name]
+		if !ok {
+			return false
+		}
+		ac := columnMap(a.Columns)
+		kept := []Column(nil)
+		for _, c := range b.Columns {
+			if _, ok := ac[c.Name]; ok {
+				kept = append(kept, c)
+				continue
+			}
+			if !c.Nullable || c.Auto != "" || c.Default != "" || c.Manual != "" || c.Extra != "" {
+				return false
+			}
+			added = true
+		}
+		b.Columns = kept
+		if !same(a, b) {
+			return false
+		}
+	}
+	return added
 }

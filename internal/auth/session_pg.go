@@ -17,8 +17,9 @@ func (s *Sessions) Create(ctx context.Context, session *Session) error {
 	err := s.DB.QueryRow(ctx, `INSERT INTO sessions
 		(user_id, token_hash, csrf_token, created_at, last_seen_at, rotated_at, absolute_expires_at)
 		SELECT id, $2, $3, $4, $4, $4, $5 FROM users WHERE id = $1 AND is_active
+AND ($6='' OR encode(sha256(convert_to(password_hash,'UTF8')),'hex')=$6) FOR SHARE
 		RETURNING id`, session.Principal.UserID, session.TokenHash[:], session.CSRFToken,
-		session.CreatedAt, session.AbsoluteExpiresAt).Scan(&session.ID)
+		session.CreatedAt, session.AbsoluteExpiresAt, session.Principal.CredentialVersion).Scan(&session.ID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrInvalidSession
 	}

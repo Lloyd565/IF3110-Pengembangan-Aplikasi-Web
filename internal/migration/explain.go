@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/sqlpolicy"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	pg "github.com/pganalyze/pg_query_go/v6"
+	parser "github.com/wasilibs/go-pgquery"
 )
-
-var explainable = []string{"select", "insert", "update", "delete", "merge", "with", "values", "table"}
 
 type PlanNode struct {
 	Depth       int
@@ -61,32 +63,38 @@ func Explain(ctx context.Context, target *pgxpool.Pool, sql string, analyze bool
 	if err := CheckTransactional(sql); err != nil {
 		return nil, err
 	}
-	tx, err := target.Begin(ctx)
+	tx, err := target.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrTargetUnavailable, err)
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 
-	setup := fmt.Sprintf(`SET LOCAL lock_timeout = %d; SET LOCAL statement_timeout = %d; SELECT pg_advisory_xact_lock(hashtext('if3110.migration'))`,
-		LockTimeout.Milliseconds(), StatementTimeout.Milliseconds())
+	setup := fmt.Sprintf(`SET LOCAL lock_timeout = %d; SET LOCAL statement_timeout = %d; SET LOCAL search_path = pg_catalog, public; SET LOCAL standard_conforming_strings = on`, LockTimeout.Milliseconds(), StatementTimeout.Milliseconds())
 	if _, err := tx.Exec(ctx, setup); err != nil {
 		return nil, ValidationError(errorMessage(err))
 	}
+	tree, err := sqlpolicy.Parse(sql)
+	if err != nil {
+		return nil, ValidationError(err.Error())
+	}
 
 	plan := &Plan{Analyze: analyze}
-	raw, norm := split(sql)
+	raw, _ := split(sql)
 	for i, st := range raw {
 		sp := StatementPlan{N: i + 1, SQL: st}
-		for _, p := range explainable {
-			sp.Explained = sp.Explained || hasPrefixWord(norm[i], p)
-		}
-		if !sp.Explained {
-			if _, err := tx.Exec(ctx, st); err != nil {
-				return nil, ValidationError(fmt.Sprintf("Statement #%d gagal: %s", i+1, errorMessage(err)))
+		node := tree.Stmts[i].Stmt
+		sp.Explained = node.GetSelectStmt() != nil || node.GetInsertStmt() != nil || node.GetUpdateStmt() != nil || node.GetDeleteStmt() != nil || node.GetMergeStmt() != nil
+		if sp.Explained {
+			if err := safePlan(ctx, tx, node, analyze); err != nil {
+				return nil, err
 			}
-		} else {
+
 			var out []byte
-			q := fmt.Sprintf("EXPLAIN (FORMAT JSON, ANALYZE %t) %s", analyze, st)
+			safeSQL, err := parser.Deparse(&pg.ParseResult{Stmts: []*pg.RawStmt{{Stmt: node}}})
+			if err != nil {
+				return nil, ValidationError("SQL tidak dapat disiapkan untuk analisis aman.")
+			}
+			q := fmt.Sprintf("EXPLAIN (FORMAT JSON, ANALYZE %t) %s", analyze, safeSQL)
 			if err := tx.QueryRow(ctx, q).Scan(&out); err != nil {
 				return nil, ValidationError(fmt.Sprintf("Statement #%d gagal: %s", i+1, errorMessage(err)))
 			}

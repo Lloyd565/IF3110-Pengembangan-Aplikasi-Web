@@ -2,6 +2,9 @@ package dbconn
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -14,6 +17,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/telemetry"
 )
 
 var ErrUnknownConnection = errors.New("dbconn: koneksi tidak terdaftar")
@@ -54,7 +59,9 @@ func Connect(ctx context.Context, p Params) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, errors.New("dbconn: parameter koneksi tidak valid")
 	}
+	cfg.ConnConfig.RuntimeParams["standard_conforming_strings"] = "on"
 	cfg.MaxConns = 4
+	telemetry.Install(cfg) // seluruh SQL ke target (termasuk read-only explorer) tercatat sebagai log dan span
 	cfg.ConnConfig.ConnectTimeout = 5 * time.Second
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
@@ -65,7 +72,7 @@ func Connect(ctx context.Context, p Params) (*pgxpool.Pool, error) {
 	defer cancel()
 	if err := pool.Ping(pctx); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("dbconn: tidak bisa terhubung ke %s:%d: %w", p.Host, p.Port, err)
+		return nil, errors.New("dbconn: target PostgreSQL tidak dapat dihubungi; periksa host, port, kredensial, dan TLS")
 	}
 	return pool, nil
 }
@@ -89,9 +96,10 @@ type Registry struct {
 	keyOnce sync.Once
 	keyErr  error
 
-	mu    sync.Mutex
-	pools map[uuid.UUID]*Target
-	dev   *pgxpool.Pool
+	mu     sync.Mutex
+	pools  map[uuid.UUID]*Target
+	stamps map[uuid.UUID][32]byte
+	dev    *pgxpool.Pool
 }
 
 func (r *Registry) key() ([]byte, error) {
@@ -115,6 +123,14 @@ func (r *Registry) Seal(connID uuid.UUID, password string) ([]byte, error) {
 	return Encrypt(key, connID, password)
 }
 
+func (r *Registry) Unseal(connID uuid.UUID, blob []byte) (string, error) {
+	key, err := r.key()
+	if err != nil {
+		return "", err
+	}
+	return Decrypt(key, connID, blob)
+}
+
 func (r *Registry) Pool(ctx context.Context, connID uuid.UUID) (*pgxpool.Pool, error) {
 	target, err := r.Target(ctx, connID)
 	if err != nil {
@@ -126,21 +142,34 @@ func (r *Registry) Pool(ctx context.Context, connID uuid.UUID) (*pgxpool.Pool, e
 	return target.Postgres, nil
 }
 
-func (r *Registry) Target(ctx context.Context, connID uuid.UUID) (*Target, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+const ConfigurationFingerprint = `encode(sha256(convert_to(jsonb_build_array(dc.dbms,dc.host,dc.port,dc.dbname,dc.username,encode(dc.password_enc,'hex'),dc.sslmode,dc.deleted_at)::text,'UTF8')),'hex')`
+const IdentityFingerprint = `encode(sha256(convert_to(jsonb_build_array(dc.id,dc.identity_epoch,dc.dbms,dc.host,dc.port,dc.dbname)::text,'UTF8')),'hex')`
 
-	if p := r.pools[connID]; p != nil {
-		return p, nil
-	}
+type Querier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func (r *Registry) Target(ctx context.Context, connID uuid.UUID) (*Target, error) {
+	return r.TargetUsing(ctx, r.DB, connID)
+}
+
+func (r *Registry) TargetUsing(ctx context.Context, q Querier, connID uuid.UUID) (*Target, error) {
 
 	var p Params
 	var enc []byte
-	err := r.DB.QueryRow(ctx, `
-		SELECT host, port, dbname, username, password_enc, sslmode, dbms
-		FROM db_connections WHERE id = $1 AND deleted_at IS NULL`, connID,
-	).Scan(&p.Host, &p.Port, &p.DBName, &p.Username, &enc, &p.SSLMode, &p.DBMS)
+	var configuration, identity string
+	err := q.QueryRow(ctx, `
+  SELECT host, port, dbname, username, password_enc, sslmode, dbms, `+ConfigurationFingerprint+`, `+IdentityFingerprint+`
+  FROM db_connections dc WHERE id = $1 AND deleted_at IS NULL`, connID,
+	).Scan(&p.Host, &p.Port, &p.DBName, &p.Username, &enc, &p.SSLMode, &p.DBMS, &configuration, &identity)
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if errors.Is(err, pgx.ErrNoRows) {
+		if old := r.pools[connID]; old != nil {
+			delete(r.pools, connID)
+			delete(r.stamps, connID)
+			go old.Close()
+		}
 		pool, err := r.devFallback()
 		if err != nil {
 			return nil, err
@@ -151,6 +180,20 @@ func (r *Registry) Target(ctx context.Context, connID uuid.UUID) (*Target, error
 		return nil, fmt.Errorf("dbconn: baca koneksi: %w", err)
 	}
 
+	serialized, _ := json.Marshal(struct {
+		Params     Params
+		Ciphertext []byte
+		Identity   string
+	}{p, enc, identity})
+	stamp := sha256.Sum256(serialized)
+	if old := r.pools[connID]; old != nil {
+		if r.stamps[connID] == stamp {
+			return old, nil
+		}
+		delete(r.pools, connID)
+		delete(r.stamps, connID)
+		go old.Close()
+	}
 	key, err := r.key()
 	if err != nil {
 		return nil, err
@@ -165,7 +208,15 @@ func (r *Registry) Target(ctx context.Context, connID uuid.UUID) (*Target, error
 	if r.pools == nil {
 		r.pools = map[uuid.UUID]*Target{}
 	}
+	if r.stamps == nil {
+		r.stamps = map[uuid.UUID][32]byte{}
+	}
+	pool.Configuration, pool.Identity = configuration, identity
+	mac := hmac.New(sha256.New, key[:])
+	mac.Write([]byte("if3110 recovery evidence v1"))
+	pool.EvidenceKey = mac.Sum(nil)
 	r.pools[connID] = pool
+	r.stamps[connID] = stamp
 	return pool, nil
 }
 
@@ -175,6 +226,7 @@ func (r *Registry) Close() {
 	for id, target := range r.pools {
 		target.Close()
 		delete(r.pools, id)
+		delete(r.stamps, id)
 	}
 	if r.dev != nil {
 		r.dev.Close()
@@ -203,6 +255,7 @@ func (r *Registry) Invalidate(connID uuid.UUID) {
 	defer r.mu.Unlock()
 	if p := r.pools[connID]; p != nil {
 		delete(r.pools, connID)
+		delete(r.stamps, connID)
 		go p.Close()
 	}
 }

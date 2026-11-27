@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 
@@ -47,5 +49,7 @@ func (c *Credentials) Authenticate(ctx context.Context, username, password strin
 	if !valid || !active {
 		return reqctx.Principal{}, ErrCredentials
 	}
+	version := sha256.Sum256([]byte(hash))
+	p.CredentialVersion = hex.EncodeToString(version[:])
 	return p, nil
 }

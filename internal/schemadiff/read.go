@@ -21,7 +21,7 @@ func Read(ctx context.Context, target *dbconn.Target, schema string) (Snapshot, 
 	var err error
 	switch target.DBMS {
 	case dbconn.PostgreSQL:
-		if schema == "information_schema" || strings.HasPrefix(schema, "pg_") {
+		if schema == "information_schema" || schema == "_platform" || strings.HasPrefix(schema, "pg_") {
 			return out, fmt.Errorf("%w: schema sistem", ErrUnsupported)
 		}
 		out, err = readPostgres(ctx, target, schema)

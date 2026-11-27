@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -33,6 +33,7 @@ type Service struct {
 	Sessions *auth.Sessions
 	Conns    *dbconn.Registry
 	Hash     func(password string) (string, error)
+	LogOnly  bool
 }
 
 func invalid(format string, a ...any) error {
@@ -48,15 +49,24 @@ func pgCode(err error) string {
 }
 
 func (s *Service) audit(ctx context.Context, actor int64, action, target string) {
+	action = strings.ReplaceAll(strings.ReplaceAll(action, "\r", "\\r"), "\n", "\\n")
+	target = strings.ReplaceAll(strings.ReplaceAll(target, "\r", "\\r"), "\n", "\\n")
+	slog.InfoContext(ctx, "admin.activity", "event", action, "actor_id", actor, "target", target)
+	if s.LogOnly {
+		return
+	}
 	if _, err := s.DB.Exec(ctx,
 		`INSERT INTO audit_log (actor_id, action, target) VALUES ($1, $2, $3)`, actor, action, target); err != nil {
-		log.Printf("audit %s: %v", action, err)
+		slog.ErrorContext(ctx, "admin.audit_persistence_failed", "event", action)
 	}
 }
 
 func (s *Service) ListUsers(ctx context.Context) ([]user.User, error) { return s.Users.List(ctx) }
 
 func checkPassword(pw string) error {
+	if len(pw) > auth.MaxPasswordBytes {
+		return invalid("password maksimal %d byte", auth.MaxPasswordBytes)
+	}
 	if len(pw) < minPasswordLen {
 		return invalid("password minimal %d karakter", minPasswordLen)
 	}
@@ -111,12 +121,20 @@ func (s *Service) ResetPassword(ctx context.Context, actor, id int64, newPasswor
 	if err != nil {
 		return err
 	}
-	if err := s.Users.SetPasswordHash(ctx, id, hash); err != nil {
-		return mapUserErr(err)
-	}
-	if err := s.Sessions.RevokeAllForUser(ctx, id); err != nil {
+	if err := pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE users SET password_hash=$2,updated_at=now() WHERE id=$1`, id, hash)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return ErrNotFound
+		}
+		_, err = tx.Exec(ctx, `UPDATE sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL`, id)
+		return err
+	}); err != nil {
 		return err
 	}
+
 	s.audit(ctx, actor, "user.reset_password", fmt.Sprintf("user:%d", id))
 	return nil
 }

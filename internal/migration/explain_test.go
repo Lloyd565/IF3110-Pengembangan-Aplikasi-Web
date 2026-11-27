@@ -23,7 +23,13 @@ func TestExplainRollsBack(t *testing.T) {
 	if _, err := target.Exec(ctx, `CREATE TABLE a (id int PRIMARY KEY); INSERT INTO a SELECT generate_series(1, 1000)`); err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Explain(ctx, target, `CREATE TABLE b (a_id int); INSERT INTO b SELECT id FROM a; SELECT * FROM a JOIN b ON b.a_id = a.id WHERE a.id = 5`, true)
+	if _, err := Explain(ctx, target, `CREATE TABLE b (a_id int); SELECT nextval('missing')`, true); !errors.As(err, new(ValidationError)) {
+		t.Fatalf("function harus ditolak: %v", err)
+	}
+	if _, err := target.Exec(ctx, `CREATE TABLE joined (a_id int); INSERT INTO joined SELECT id FROM a`); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Explain(ctx, target, `CREATE TABLE b (a_id int); SELECT * FROM a; SELECT * FROM a JOIN joined ON joined.a_id = a.id WHERE a.id = 5`, true)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -89,7 +89,7 @@ func ListSchemas(ctx context.Context, db *pgxpool.Pool) ([]Schema, error) {
 			FROM pg_namespace n
 			LEFT JOIN pg_class c ON c.relnamespace = n.oid
 				AND c.relkind IN ('r','p','v','m','f') AND NOT c.relispartition
-			WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\_%'
+			WHERE n.nspname NOT IN ('information_schema','_platform') AND n.nspname NOT LIKE 'pg\_%'
 			ORDER BY n.nspname, c.relname`)
 		if err != nil {
 			return err
@@ -115,6 +115,9 @@ func ListSchemas(ctx context.Context, db *pgxpool.Pool) ([]Schema, error) {
 }
 
 func findTable(ctx context.Context, tx pgx.Tx, schema, table string) (oid uint32, kind string, err error) {
+	if schema == "_platform" {
+		return 0, "", ErrNotFound
+	}
 	err = tx.QueryRow(ctx, `
 		SELECT c.oid, `+kindSQL+`
 		FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace

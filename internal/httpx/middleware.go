@@ -1,18 +1,23 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/auth"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/telemetry"
 )
 
 type sessionContextKey struct{}
@@ -55,7 +60,7 @@ func (s *Server) clearCookie(w http.ResponseWriter, r *http.Request, name string
 
 func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/static/") {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" || strings.HasPrefix(r.URL.Path, "/static/") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -75,6 +80,9 @@ func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 			if err == nil {
 				s.setSessionCookie(w, r, result)
 				ctx := reqctx.WithPrincipal(r.Context(), result.Session.Principal)
+				info := telemetry.From(ctx)
+				info.Actor = strconv.FormatInt(result.Session.Principal.UserID, 10)
+				ctx = telemetry.With(ctx, info)
 				ctx = reqctx.WithCSRFToken(ctx, result.Session.CSRFToken)
 				ctx = context.WithValue(ctx, sessionContextKey{}, result.Session)
 				r = r.WithContext(ctx)
@@ -111,6 +119,29 @@ func sameOrigin(r *http.Request, publicOrigin string) bool {
 		u.User == nil && u.Path == "" && u.RawQuery == "" && u.Fragment == ""
 }
 
+func (s *Server) requestBodyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body == nil || r.Body == http.NoBody {
+			next.ServeHTTP(w, r)
+			return
+		}
+		limited := http.MaxBytesReader(w, r.Body, maxFormBytes)
+		body, err := io.ReadAll(limited)
+		limited.Close()
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.As(err, new(*http.MaxBytesError)) {
+				status = http.StatusRequestEntityTooLarge
+			}
+			s.renderError(w, r, status, "Body request tidak valid atau terlalu besar.")
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
@@ -122,7 +153,12 @@ func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
-		if err := r.ParseForm(); err != nil {
+		media, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		var parseErr error
+		if media != "application/json" {
+			parseErr = r.ParseForm()
+		}
+		if err := parseErr; err != nil {
 			status := http.StatusBadRequest
 			if errors.As(err, new(*http.MaxBytesError)) {
 				status = http.StatusRequestEntityTooLarge
@@ -135,7 +171,7 @@ func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
 			token = r.PostForm.Get("csrf_token")
 		}
 		want := reqctx.CSRFToken(r.Context())
-		if _, loggedIn := reqctx.CurrentPrincipal(r.Context()); !loggedIn && r.URL.Path == "/login" {
+		if _, loggedIn := reqctx.CurrentPrincipal(r.Context()); !loggedIn && (r.URL.Path == "/login" || r.URL.Path == "/api/auth/login") {
 			if cookie, err := r.Cookie(s.csrfCookieName()); err == nil && s.CSRF.ValidPreSession(cookie.Value) {
 				want = cookie.Value
 			}
@@ -151,6 +187,10 @@ func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := reqctx.CurrentPrincipal(r.Context()); !ok {
+			if isAPI(r) {
+				apiError(w, http.StatusUnauthorized, "unauthenticated", "Silakan login kembali.")
+				return
+			}
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
@@ -185,6 +225,9 @@ func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
 func (s *Server) secureHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'none'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		if s.SPAEnabled {
+			w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
@@ -14,9 +15,13 @@ type Authorizer struct {
 	DB *pgxpool.Pool
 }
 
-func (a *Authorizer) effectiveLevel(ctx context.Context, userID int64, connID uuid.UUID) (Level, error) {
+type Querier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func effectiveLevel(ctx context.Context, q Querier, userID int64, connID uuid.UUID) (Level, error) {
 	var edit, view bool
-	err := a.DB.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		SELECT COALESCE(bool_or(g.level = 'edit'), false),
 		       COALESCE(bool_or(g.level = 'view'), false)
 		FROM group_members m
@@ -38,7 +43,11 @@ func (a *Authorizer) effectiveLevel(ctx context.Context, userID int64, connID uu
 }
 
 func (a *Authorizer) Can(ctx context.Context, p reqctx.Principal, connID uuid.UUID, act Action) error {
-	lvl, err := a.effectiveLevel(ctx, p.UserID, connID)
+	return CanUsing(ctx, a.DB, p, connID, act)
+}
+
+func CanUsing(ctx context.Context, q Querier, p reqctx.Principal, connID uuid.UUID, act Action) error {
+	lvl, err := effectiveLevel(ctx, q, p.UserID, connID)
 	if err != nil {
 		return fmt.Errorf("authz: baca grant: %w", err)
 	}

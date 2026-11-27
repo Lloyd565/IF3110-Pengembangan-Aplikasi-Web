@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"regexp"
 	"strings"
 	"time"
 
@@ -16,6 +15,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/sqlpolicy"
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/telemetry"
 )
 
 var (
@@ -57,100 +58,33 @@ func pgRunner(target *pgxpool.Pool) runner {
 	}
 }
 
-var dollarTag = regexp.MustCompile(`^\$([A-Za-z_][A-Za-z_0-9]*)?\$`)
-
 func statements(sql string) []string {
 	_, norm := split(sql)
 	return norm
 }
 
 func split(sql string) (raw, norm []string) {
-	var b strings.Builder
-	start := 0
-	emit := func(end int) {
-		if st := strings.Join(strings.Fields(strings.ToLower(b.String())), " "); st != "" {
-			raw = append(raw, strings.TrimSpace(sql[start:end]))
-			norm = append(norm, st)
-		}
-		b.Reset()
-		start = end + 1
+	tree, err := sqlpolicy.Parse(sql)
+	if err != nil {
+		return nil, nil
 	}
-	for i := 0; i < len(sql); {
-		rest := sql[i:]
-		switch {
-		case strings.HasPrefix(rest, "--"):
-			if j := strings.IndexByte(rest, '\n'); j >= 0 {
-				i += j
-			} else {
-				i = len(sql)
-			}
-		case strings.HasPrefix(rest, "/*"):
-			if j := strings.Index(rest[2:], "*/"); j >= 0 {
-				i += j + 4
-			} else {
-				i = len(sql)
-			}
-			b.WriteByte(' ')
-		case rest[0] == '\'' || rest[0] == '"':
-			q, j := rest[0], 1
-			for j < len(rest) {
-				if rest[j] == q {
-					if j+1 < len(rest) && rest[j+1] == q {
-						j += 2
-						continue
-					}
-					break
-				}
-				j++
-			}
-			i += j + 1
-			b.WriteString(" x ")
-		case rest[0] == '$' && dollarTag.MatchString(rest):
-			tag := dollarTag.FindString(rest)
-			if j := strings.Index(rest[len(tag):], tag); j >= 0 {
-				i += len(tag) + j + len(tag)
-			} else {
-				i = len(sql)
-			}
-			b.WriteString(" x ")
-		case rest[0] == ';':
-			emit(i)
-			i++
-		default:
-			b.WriteByte(rest[0])
-			i++
+	for _, stmt := range tree.Stmts {
+		start, end := int(stmt.StmtLocation), len(sql)
+		if stmt.StmtLen > 0 {
+			end = start + int(stmt.StmtLen)
 		}
+		st := strings.TrimSpace(sql[start:end])
+		raw = append(raw, st)
+		norm = append(norm, strings.ToLower(st))
 	}
-	emit(len(sql))
 	return raw, norm
 }
-
-var (
-	txControl       = []string{"begin", "start transaction", "commit", "end", "rollback", "abort", "prepare transaction"}
-	nonTransactable = []string{"vacuum", "create database", "drop database", "alter system", "create tablespace", "drop tablespace", "reindex database", "reindex system"}
-)
 
 func hasPrefixWord(st, p string) bool { return st == p || strings.HasPrefix(st, p+" ") }
 
 func CheckTransactional(sql string) error {
-	stmts := statements(sql)
-	if len(stmts) == 0 {
-		return ValidationError("SQL migration tidak berisi perintah apa pun.")
-	}
-	for _, st := range stmts {
-		for _, p := range txControl {
-			if hasPrefixWord(st, p) {
-				return ValidationError(fmt.Sprintf("Migration tidak boleh berisi %s. Platform sudah menjalankan seluruh SQL dalam satu transaksi.", strings.ToUpper(p)))
-			}
-		}
-		for _, p := range nonTransactable {
-			if hasPrefixWord(st, p) {
-				return ValidationError(fmt.Sprintf("Perintah %s tidak bisa dijalankan di dalam transaksi, jadi tidak bisa lewat migration.", strings.ToUpper(p)))
-			}
-		}
-		if strings.Contains(" "+st+" ", " concurrently ") && !hasPrefixWord(st, "refresh materialized view") {
-			return ValidationError("Perintah dengan CONCURRENTLY tidak bisa dijalankan di dalam transaksi. Hapus kata CONCURRENTLY.")
-		}
+	if err := sqlpolicy.Check(sql); err != nil {
+		return ValidationError(err.Error())
 	}
 	return nil
 }
@@ -188,7 +122,7 @@ func execute(ctx context.Context, platform *pgxpool.Pool, connID uuid.UUID, id, 
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
 	if err := try(saveCtx); err != nil {
-		log.Printf("migration %d: status gagal disimpan, dicoba ulang di background: %v", id, err)
+		log.Printf("migration %d: status gagal disimpan, dicoba ulang di background: %v", id, telemetry.RedactError(err))
 		retryInBackground(id, try)
 		return ErrStatusPending
 	}
@@ -236,7 +170,7 @@ func retryInBackground(id int64, try func(context.Context) error) {
 				log.Printf("migration %d: status berhasil disinkronkan", id)
 				return
 			}
-			log.Printf("migration %d: sinkronisasi status gagal: %v", id, err)
+			log.Printf("migration %d: sinkronisasi status gagal: %v", id, telemetry.RedactError(err))
 		}
 	}()
 }
@@ -294,7 +228,7 @@ func runOnTarget(ctx context.Context, target *pgxpool.Pool, id int64, sql string
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 
-	setup := fmt.Sprintf(`SET LOCAL lock_timeout = %d; SET LOCAL statement_timeout = %d; %s`,
+	setup := fmt.Sprintf(`SET LOCAL lock_timeout = %d; SET LOCAL statement_timeout = %d; SET LOCAL standard_conforming_strings = on; %s`,
 		LockTimeout.Milliseconds(), StatementTimeout.Milliseconds(), pgLock)
 	if _, err := tx.Exec(ctx, setup); err != nil {
 		return err
@@ -336,21 +270,14 @@ func appliedPG(ctx context.Context, target *pgxpool.Pool, id int64) (bool, error
 }
 
 func errorMessage(err error) string {
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) {
+	if errors.Is(err, errInterrupted) || errors.Is(err, ErrBusy) || err.Error() == manualCheckMessage {
 		return err.Error()
 	}
-	msg := fmt.Sprintf("%s: %s (SQLSTATE %s)", pgErr.Severity, pgErr.Message, pgErr.Code)
-	if pgErr.Detail != "" {
-		msg += "\nDetail: " + pgErr.Detail
+	var invalid ValidationError
+	if errors.As(err, &invalid) {
+		return invalid.Error()
 	}
-	if pgErr.Hint != "" {
-		msg += "\nHint: " + pgErr.Hint
-	}
-	if pgErr.Where != "" {
-		msg += "\nKonteks: " + pgErr.Where
-	}
-	return msg
+	return telemetry.RedactError(err)
 }
 
 func ptr[T any](v T) *T { return &v }
@@ -381,7 +308,7 @@ func RecoverInterrupted(ctx context.Context, platform *pgxpool.Pool, open func(c
 		err := try(tryCtx)
 		cancel()
 		if err != nil {
-			log.Printf("migration %d: pemulihan gagal, dicoba ulang di background: %v", p.ID, err)
+			log.Printf("migration %d: pemulihan gagal, dicoba ulang di background: %v", p.ID, telemetry.RedactError(err))
 			retryInBackground(p.ID, try)
 		}
 	}
