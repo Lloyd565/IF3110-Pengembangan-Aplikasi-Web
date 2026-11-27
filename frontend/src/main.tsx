@@ -47,7 +47,20 @@ function Login() {
   const s = useSession()
   if (s.loading) return <main className="login-screen"><Loading /></main>
   if (s.user) return <Navigate to="/dashboard" replace />
-  return <main className="login-screen"><div className="login-brand"><span className="brand-mark">DB</span><p>IF3110 · DATABASE MANAGEMENT</p><h1>Kelola perubahan.<br />Jaga kendali.</h1><p>Satu tempat untuk akses database, peninjauan migration, dan pemantauan pekerjaan.</p></div><section className="login-card"><span className="eyebrow">Selamat datang kembali</span><h2>Masuk ke platform</h2><p className="muted">Gunakan akun platform yang diberikan administrator.</p><ErrorBox error={s.error} retry={() => void s.refresh()} /><Form onSubmit={async d => s.signIn(text(d, 'username'), text(d, 'password'))}><Field label="Username"><input name="username" autoComplete="username" maxLength={200} required autoFocus /></Field><Field label="Password"><input name="password" type="password" autoComplete="current-password" maxLength={1024} required /></Field><button className="full">Masuk</button></Form><p className="muted small">Session dilindungi dengan cookie HttpOnly dan token CSRF.</p></section></main>
+  return <main className="login-screen">
+    <div className="login-brand">
+      <h1>Runggu Data</h1>
+    </div>
+    <section className="login-card">
+      <h2>Selamat datang kembali</h2>
+      <ErrorBox error={s.error} retry={() => void s.refresh()} />
+      <Form onSubmit={async d => s.signIn(text(d, 'username'), text(d, 'password'))}>
+        <Field label="Username"><input name="username" autoComplete="username" maxLength={200} required autoFocus /></Field>
+        <Field label="Password"><input name="password" type="password" autoComplete="current-password" maxLength={1024} required /></Field>
+        <button className="full">Masuk</button>
+      </Form>
+    </section>
+  </main>
 }
 
 function Protected() {
@@ -61,7 +74,7 @@ function Administrator() { return useSession().user?.is_platform_admin ? <Outlet
 function Layout() {
   const s = useSession(); const [open, setOpen] = useState(false); const location = useLocation()
   useEffect(() => { setOpen(false); window.scrollTo(0, 0) }, [location.pathname])
-  return <div className="app-shell"><a className="skip-link" href="#main">Langsung ke konten</a><header className="topbar"><Link className="brand" to="/dashboard"><span className="brand-mark">DB</span><span>IF3110 <small>Database Platform</small></span></Link><div className="header-actions"><span className="username">{s.user?.username}</span><Action run={s.signOut}>Keluar</Action><button className="menu-toggle secondary" type="button" aria-label="Buka navigasi" aria-expanded={open} aria-controls="main-nav" onClick={() => setOpen(!open)}>☰</button></div></header><aside id="main-nav" className={`sidebar ${open ? 'open' : ''}`}><span className="nav-label">WORKSPACE</span><NavLink to="/dashboard">Database saya</NavLink>{s.user?.is_platform_admin && <><span className="nav-label">ADMINISTRASI</span><NavLink to="/admin/users">Pengguna</NavLink><NavLink to="/admin/groups">Group & anggota</NavLink><NavLink to="/admin/connections">Koneksi database</NavLink><NavLink to="/admin/grants">Hak akses</NavLink></>}<div className="sidebar-note">Akses dan setiap perubahan diperiksa kembali oleh server.</div></aside><main id="main" className="workspace"><ErrorBox error={s.error} retry={() => void s.refresh()} /><Outlet /></main></div>
+  return <div className="app-shell"><a className="skip-link" href="#main">Langsung ke konten</a><header className="topbar"><Link className="brand" to="/dashboard">Runggu Data</Link><div className="header-actions"><span className="username">{s.user?.username}</span><Action run={s.signOut}>Keluar</Action><button className="menu-toggle secondary" type="button" aria-label="Buka navigasi" aria-expanded={open} aria-controls="main-nav" onClick={() => setOpen(!open)}>☰</button></div></header><aside id="main-nav" className={`sidebar ${open ? 'open' : ''}`}><span className="nav-label">WORKSPACE</span><NavLink to="/dashboard">Database saya</NavLink>{s.user?.is_platform_admin && <><span className="nav-label">ADMINISTRASI</span><NavLink to="/admin/users">Pengguna</NavLink><NavLink to="/admin/groups">Group & anggota</NavLink><NavLink to="/admin/connections">Koneksi database</NavLink><NavLink to="/admin/grants">Hak akses</NavLink></>}<div className="sidebar-note">Akses dan setiap perubahan diperiksa kembali oleh server.</div></aside><main id="main" className="workspace"><ErrorBox error={s.error} retry={() => void s.refresh()} /><Outlet /></main></div>
 }
 
 function Dashboard() {

@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/contracts"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/telemetry"
 )
 
@@ -89,13 +90,7 @@ func (j *Job) Terminal() bool {
 // PublicStatus: nama status untuk API/SPA. Job gagal yang meninggalkan perubahan committed
 // dilaporkan sebagai hold-nya (partial, partially_reverted, commit_unknown); retry_wait tampil queued.
 func (j *Job) PublicStatus() string {
-	switch {
-	case j.Status == StatusFailed && j.Hold != HoldNone:
-		return j.Hold
-	case j.Status == StatusRetryWait:
-		return StatusQueued
-	}
-	return j.Status
+	return contracts.PublicJobStatus(j.Status, j.Hold)
 }
 
 const cols = `id, connection_id, request_id, kind, parent_job_id, root_job_id, plan, status, hold, attempt,

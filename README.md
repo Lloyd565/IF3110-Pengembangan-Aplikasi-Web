@@ -1,6 +1,6 @@
-# IF3110 - Database Management Platform
+# Runggu Data
 
-Tugas Besar IF3110 Pengembangan Aplikasi Web. Aplikasi ini mengatur akses ke database target, menyediakan penjelajahan schema dan data, serta membantu pengguna meninjau perubahan schema. PostgreSQL menyimpan metadata platform, termasuk pengguna, session, group, grant, dan koneksi target.
+Runggu Data adalah platform pengelolaan database untuk Tugas Besar IF3110 Pengembangan Aplikasi Web. Aplikasi ini mengatur akses ke database target, menyediakan penjelajahan schema dan data, serta membantu pengguna meninjau perubahan schema. PostgreSQL menyimpan metadata platform, termasuk pengguna, session, group, grant, dan koneksi target.
 
 ## Implementasi
 
@@ -103,7 +103,7 @@ Akun Platform Admin mengelola pengguna, group, keanggotaan, koneksi, dan grant m
 
 Anggota group dengan grant View melihat database pada dashboard dan membuka schema, data, history, serta preview schema diff. Grant Edit menyediakan pembuatan draft dan pengajuan migration. Workspace memuat tab Schema, Migration, Review & approval, History, Job, dan Schema diff.
 
-Draft migration memuat SQL up serta SQL down atau alasan irreversible. Pengajuan mengacu pada revisi tertentu dan memerlukan approval leader group sesuai akses database. Perubahan revisi memerlukan review terhadap revisi yang digunakan. Enqueue menghasilkan job ID untuk pemantauan status, attempt, baris, batch yang telah commit, dan error.
+Draft migration memuat SQL up serta SQL down atau alasan irreversible. Pengajuan mengacu pada revisi tertentu dan memerlukan approval leader group sesuai akses database. Perubahan revisi memerlukan review terhadap revisi yang digunakan. Enqueue menghasilkan job ID untuk pemantauan status, attempt, baris, batch yang telah commit, dan error. Review & approval menampilkan status pengajuan dan status job terbaru secara terpisah serta menyediakan tautan ke detail job.
 
 Worker memeriksa ulang izin dan approval, mengambil job dari queue persisten, dan menjalankan SQL di luar request HTTP. Pengajuan terikat pada konfigurasi koneksi dan identitas server/database target. Perubahan host, database, kredensial, TLS, atau DBMS membuat approval lama tidak berlaku untuk eksekusi. Pergantian kredensial tidak mengubah identitas target untuk pembacaan bukti pemulihan. Worker memprioritaskan pemulihan lease yang kedaluwarsa dan memakai backoff dengan batas percobaan saat bukti belum dapat dibaca. Pengajuan yang telah masuk queue tetap menerima perubahan keputusan leader; penolakan berlaku sebelum transaksi batch berikutnya. Job pada database yang sama memakai lock eksekusi, sedangkan database berbeda dapat diproses oleh worker berbeda. Rollback menggunakan SQL down dari revisi terkait. Forward dan pemulihan partial batch mengikuti pengajuan serta approval. History attempt dan status job tersimpan dalam satu transaksi metadata. Setiap klaim memiliki token kepemilikan dan lease; worker pengganti memeriksa identitas target dan autentikasi bukti sebelum melanjutkan pekerjaan. Bukti yang tidak tersedia atau tidak sah mempertahankan keadaan yang perlu direkonsiliasi. Draft lama memperoleh identitas target ketika dikirim untuk review. Pengajuan lama yang sudah ditinjau memerlukan pengajuan baru. History lama tetap tersedia.
 
