@@ -111,7 +111,7 @@ Platform Admin tetap memerlukan keanggotaan group dan grant untuk membuka databa
 
 Cursor batch PostgreSQL memakai kolom integer `NOT NULL` dengan primary key atau unique index satu kolom yang valid dan tidak parsial. Tabel dengan inheritance, partisi, atau trigger pengguna tidak memenuhi prasyarat cursor batch. SQL menyertakan batas `cursor > $1 AND cursor <= $2` dan tidak mengubah cursor. Nilai minimum bigint ditolak karena tidak mempunyai batas bawah eksklusif yang dapat direpresentasikan oleh bigint.
 
-Cakupan batch mengikuti high-water mark yang tersimpan saat mulai, dengan ukuran 1 sampai 100000 baris. Setiap transaksi batch mengambil lock tulis pada tabel terkait selama pemilihan rentang dan eksekusi. Insert dengan cursor di atas high-water mark tidak ikut diproses; insert pada rentang yang belum dilewati dapat ikut diproses. Baris yang telah dihapus tidak diproses. Nilai total awal merupakan jumlah baris saat cakupan dibuat, sehingga dapat berbeda dari jumlah akhir ketika ada perubahan eksternal. Perubahan cursor oleh transaksi eksternal tidak memenuhi asumsi cursor stabil; cakupan ini memakai keanggotaan baris yang tersedia saat setiap batch dimulai. Batch UPDATE mencatat versi baris yang berhasil diubah dalam transaksi yang sama dengan checkpoint. Rollback hanya menjalankan SQL down pada baris yang versinya masih cocok. Baris baru di rentang lama tidak ikut berubah. Perubahan versi, penghapusan, atau checkpoint lama tanpa daftar baris memerlukan rekonsiliasi. Batch selain UPDATE tetap dapat dijalankan sesuai SQL yang disetujui dan memerlukan rekonsiliasi jika rollback tidak dapat membuktikan kumpulan baris yang aman.
+Cakupan batch mengikuti high-water mark yang tersimpan saat mulai, dengan ukuran 1 sampai 100000 baris. Setiap transaksi batch mengambil lock tulis pada tabel terkait selama pemilihan rentang dan eksekusi. Insert dengan cursor di atas high-water mark tidak ikut diproses; insert pada rentang yang belum dilewati dapat ikut diproses. Baris yang telah dihapus tidak diproses. Nilai total awal merupakan jumlah baris saat cakupan dibuat, sehingga dapat berbeda dari jumlah akhir ketika ada perubahan eksternal. Perubahan cursor oleh transaksi eksternal tidak memenuhi asumsi cursor stabil; cakupan ini memakai keanggotaan baris yang tersedia saat setiap batch dimulai. Batch UPDATE mencatat versi baris yang berhasil diubah dalam transaksi yang sama dengan checkpoint. Rollback hanya menjalankan SQL down pada baris yang versinya masih cocok. Baris baru di rentang lama tidak ikut berubah. Perubahan versi, penghapusan, atau checkpoint lama tanpa daftar baris memerlukan rekonsiliasi. Mode batch untuk apply dan forward hanya menerima UPDATE, karena hanya baris UPDATE yang tercatat sehingga dapat dikompensasi. DELETE dan INSERT ditolak saat pengajuan. SQL down pada rollback batch boleh berupa UPDATE atau DELETE.
 
 ### Target MariaDB (bonus DBMS tambahan)
 
@@ -203,7 +203,35 @@ Grafana menggunakan akun `admin` dan password dari `GRAFANA_ADMIN_PASSWORD`. Das
 
 [Workflow CodeQL](.github/workflows/codeql.yml) memindai Go dan JavaScript/TypeScript dengan suite `security-extended`. GitHub Actions menyimpan hasil SARIF per bahasa sebagai artifact run terkait.
 
-Executor migration menerima SQL dari pengguna yang memiliki izin. Temuan pada jalur eksekusi SQL memerlukan peninjauan bersama validasi statement, cakupan database, grant, dan approval. Query katalog dengan identifier dinamis memakai quoting sesuai DBMS.
+Cakupan scan: seluruh kode Go (`cmd/`, `internal/`) dan sumber SPA (`frontend/src`). Direktori `frontend/node_modules`, hasil build `web/static/spa`, dan `artifacts` dikecualikan melalui [konfigurasi CodeQL](.github/codeql/config.yml). Rule `go/sql-injection` tidak dimatikan, sehingga query katalog dan query internal tetap diperiksa.
+
+### Temuan
+
+Scan pada [PR #19](https://github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/pull/19) menghasilkan empat temuan. Semuanya berasal dari rule yang sama dan berada pada jalur eksekusi migration MariaDB.
+
+| # | Rule | Severity | Lokasi | Potensi dampak | Keputusan |
+|---|---|---|---|---|---|
+| 1 | `go/sql-injection` (CWE-89) | Error / High | [`internal/migration/workflow_target.go:182`](internal/migration/workflow_target.go#L182): worker M2 mengeksekusi satu statement DDL migration | Pengguna dengan izin dapat menjalankan SQL apa pun dalam batas hak kredensial koneksi target | Risiko diterima (by design) |
+| 2 | `go/sql-injection` (CWE-89) | Error / High | [`internal/migration/workflow_target.go:213`](internal/migration/workflow_target.go#L213): worker M2 mengeksekusi statement DML migration dalam satu transaksi InnoDB | Sama dengan temuan 1 | Risiko diterima (by design) |
+| 3 | `go/sql-injection` (CWE-89) | Error / High | [`internal/migration/mariadb.go:429`](internal/migration/mariadb.go#L429): executor sinkron M1 (`runMaria`) mengeksekusi DDL | Sama dengan temuan 1, tanpa approval leader | Risiko diterima: jalur tidak aktif pada build produksi |
+| 4 | `go/sql-injection` (CWE-89) | Error / High | [`internal/migration/mariadb.go:447`](internal/migration/mariadb.go#L447): executor sinkron M1 (`runMaria`) mengeksekusi DML | Sama dengan temuan 3 | Risiko diterima: jalur tidak aktif pada build produksi |
+
+**Alasan.** Keempat sink adalah titik eksekusi isi migration, yaitu SQL up/down yang memang ditulis pengguna. Menjalankan SQL tersebut adalah fungsi utama platform. Parameterisasi tidak dapat diterapkan karena placeholder hanya menggantikan nilai, bukan statement DDL/DML utuh. Temuan ini benar secara aliran data, tetapi bukan injeksi ke query milik aplikasi.
+
+Temuan 3 dan 4 berada pada executor sinkron M1. Executor ini hanya dipanggil oleh route `POST /db/{id}/migrations/{mid}/execute` pada mode template lama. Server produksi selalu berjalan dengan `SPAEnabled: true` ([`cmd/server/main.go`](cmd/server/main.go)). Pada mode itu route tersebut tidak terdaftar, dan semua permintaan non-GET di luar API dijawab `410 legacy_endpoint_disabled`. Akibatnya setiap eksekusi wajib melewati queue, approval, dan worker. Kode M1 dipertahankan untuk pengujian regresi M1.
+
+**Mitigasi pada jalur worker M2 (temuan 1 dan 2):**
+
+- Hanya pengguna dengan grant edit yang dapat membuat dan mengajukan migration.
+- Setiap eksekusi, termasuk rollback dan forward, wajib disetujui leader dari setiap group yang memiliki akses ke database. Revisi SQL bersifat immutable dan terikat pada approval.
+- Worker memeriksa ulang izin, approval, revisi, dan identitas server target tepat sebelum eksekusi (`revalidate`, `verifyMariaServer`).
+- `mariaSQL` ([`internal/migration/mariadb.go`](internal/migration/mariadb.go)) membatasi DDL menjadi satu statement per migration tanpa campuran DML. Pembatasan lainnya adalah engine InnoDB saja, tanpa CTAS/LIKE, dan DROP/RENAME untuk satu objek.
+- `mariaScope` menolak akses ke tabel kontrol internal dan fungsi `release_lock`/`release_all_locks`.
+- Status tabel kontrol dibandingkan sebelum dan sesudah eksekusi. Perubahan dari SQL migration membatalkan transaksi DML (`ErrUnsafe`) atau menandai hasil DDL sebagai `commit_unknown`.
+
+**Risiko sisa.** SQL berjalan dengan kredensial koneksi target. Belum ada pemisahan role database antara akun migration dan akun metadata platform. Admin sebaiknya mendaftarkan koneksi dengan akun yang haknya terbatas pada schema aplikasi.
+
+Keempat alert di-dismiss pada GitHub Code Scanning dengan status *Won't fix* beserta alasan di atas. Hasil scan lain tetap aktif pada setiap push dan pull request.
 
 ## Pengujian
 
