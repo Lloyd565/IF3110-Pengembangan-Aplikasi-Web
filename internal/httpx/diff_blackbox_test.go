@@ -288,7 +288,7 @@ func TestIntegrationBlackboxSchemaDiff(t *testing.T) {
 			save.Set("source_hash", diffHash(t, body, "source"))
 			save.Set("reference_hash", diffHash(t, body, "reference"))
 			save.Set("sql", "DROP TABLE must_not_be_used")
-			// Generation must not execute SQL; applying drift is reserved for execution.
+
 			if !strings.Contains(html.UnescapeString(preview), "obsolete") {
 				t.Fatal("removed column not shown")
 			}

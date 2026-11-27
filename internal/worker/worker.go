@@ -1,7 +1,3 @@
-// Package worker mengambil job dari queue dan menjalankannya di Target DB. Urutan per job:
-// claim (lease) -> revalidasi izin/approval/revisi -> catat attempt -> lock target -> eksekusi
-// -> bukti commit di target -> hasil attempt di history -> status job. Worker memakai context
-// job sendiri, bukan context HTTP yang sudah selesai.
 package worker
 
 import (
@@ -29,21 +25,18 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/workflow"
 )
 
-// Flow adalah bagian workflow (milik Richard) yang dibutuhkan worker; workflow.Service memenuhinya.
 type Flow interface {
 	Prepare(ctx context.Context, requestID string) (workflow.Plan, error)
 	BeginAttempt(ctx context.Context, pl workflow.Plan, jobID string, attemptNo int) (string, error)
 	FinishAttempt(ctx context.Context, executionID, status, errMsg string) error
 }
 
-// Recoverer opsional: revalidasi untuk resume. Pengajuan semula tetap harus approved, tetapi
-// penahan posisi (partial/commit_unknown) justru yang sedang dipulihkan, jadi tidak ikut diperiksa.
 type Recoverer interface {
-	PrepareRecovery(ctx context.Context, requestID string) (workflow.Plan, error)
+	PrepareRecovery(ctx context.Context, requestID string, resumeActorID int64) (workflow.Plan, error)
 }
 
 type Revalidator interface {
-	Revalidate(ctx context.Context, requestID string, recovery bool) error
+	Revalidate(ctx context.Context, requestID string, recovery bool, resumeActorID int64) error
 }
 
 type Targets interface {
@@ -71,7 +64,7 @@ type Worker struct {
 
 	ReconcileWait time.Duration
 
-	Hooks   batch.Hooks // hanya untuk failure injection pada test
+	Hooks   batch.Hooks
 	Metrics Metrics
 }
 
@@ -89,7 +82,6 @@ func (w *Worker) backoff(retry int) time.Duration {
 	return min(time.Second<<min(retry, 6), time.Minute)
 }
 
-// Run memproses job sampai ctx dibatalkan (shutdown).
 func (w *Worker) Run(ctx context.Context) error {
 	poll := w.Poll
 	if poll <= 0 {
@@ -110,7 +102,6 @@ func (w *Worker) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// RunOnce mengklaim dan memproses satu job. false berarti tidak ada pekerjaan.
 func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	owner := *w
 	owner.ID = w.ID + ":" + uuid.NewString()
@@ -147,7 +138,7 @@ func classify(err error) result {
 	case batch.IsDefinite(err):
 		return permanent
 	}
-	return transient // jaringan putus dsb: bukti di target mencegah double commit, aman diulang
+	return transient
 }
 
 func (w *Worker) process(parent context.Context, j *jobs.Job) {
@@ -170,7 +161,7 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 		return
 	}
 	info := telemetry.Info{Actor: strconv.FormatInt(snap.ActorID, 10), Database: j.ConnectionID.String(), CorrelationID: j.RequestID.String(),
-		MigrationID: snap.MigrationID, RequestID: j.RequestID.String(), JobID: j.ID, Attempt: j.Attempt + 1, Op: snap.Action}
+		MigrationID: snap.MigrationID, RevisionID: snap.RevisionID, RequestID: j.RequestID.String(), JobID: j.ID, Attempt: j.Attempt + 1, Op: snap.Action}
 	ctx = telemetry.With(ctx, info)
 	if w.Metrics != nil && j.RetryCount == 0 {
 		w.Metrics.QueueWait(time.Since(j.QueuedAt))
@@ -180,7 +171,7 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 	var lost atomic.Bool
 	stop := make(chan struct{})
 	defer close(stop)
-	hctx := ctx // salinan: ctx milik proses ditimpa di bawah, goroutine tidak boleh membacanya
+	hctx := ctx
 	go func() {
 		t := time.NewTicker(max(w.lease()/3, time.Millisecond))
 		defer t.Stop()
@@ -204,6 +195,9 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 	}()
 
 	if j.AttemptOpen && j.ExecutionID != "" {
+		recovered := info
+		recovered.ExecutionID, recovered.Attempt = j.ExecutionID, j.Attempt
+		ctx = telemetry.With(ctx, recovered)
 		if r, ok := w.Flow.(interface {
 			AttemptStatus(context.Context, string, workflow.Plan) (string, error)
 		}); ok {
@@ -259,11 +253,16 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 		}
 	}
 
+	ctx = telemetry.With(ctx, info)
 	if j.RetryCount > j.MaxRetries {
 		_ = jobs.Fail(ctx, w.DB, j.ID, w.ID, j.Hold, "Batas percobaan worker tercapai.")
 		return
 	}
-	plan, err := w.prepare(ctx, j)
+	var resumeActorID int64
+	if j.Kind == jobs.KindResume {
+		resumeActorID = snap.ActorID
+	}
+	plan, err := w.prepare(ctx, j, resumeActorID)
 	plan.EvidenceNonce = snap.EvidenceNonce
 	if err == nil && snap.TargetIdentity != "" && plan != snap {
 		err = &contracts.Error{Status: 409, Message: "Rencana eksekusi tidak sama dengan pengajuan pada queue."}
@@ -277,6 +276,7 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 		return
 	}
 	info.Op, info.MigrationID, info.Actor = plan.Action, plan.MigrationID, strconv.FormatInt(plan.ActorID, 10)
+	info.RevisionID = plan.RevisionID
 
 	attemptNo := j.Attempt + 1
 	exec, err := w.beginAttempt(ctx, j, plan, attemptNo)
@@ -288,7 +288,7 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 	info.ExecutionID, info.Attempt = exec, attemptNo
 	ctx = telemetry.With(ctx, info)
 
-	prog, runErr := w.execute(ctx, j, plan, &lost, cancel)
+	prog, runErr := w.execute(ctx, j, plan, resumeActorID, &lost, cancel)
 	if lost.Load() {
 		telemetry.Event(ctx, slog.LevelWarn, "job.lease_lost", "abandoned")
 		return
@@ -296,20 +296,16 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 	w.finish(ctx, j, exec, prog, runErr, started, &lost)
 }
 
-func (w *Worker) prepare(ctx context.Context, j *jobs.Job) (workflow.Plan, error) {
-	// Job yang membawa hold (partial, commit_unknown, partially_reverted) sedang memulihkan keadaan yang
-	// ia tinggalkan sendiri; penahan itu tidak boleh menolaknya. Job tanpa hold tetap diperiksa penuh
-	// terhadap posisi database, sehingga urutan linear terjaga.
+func (w *Worker) prepare(ctx context.Context, j *jobs.Job, resumeActorID int64) (workflow.Plan, error) {
+
 	if j.Kind == jobs.KindResume || j.Hold != jobs.HoldNone {
 		if r, ok := w.Flow.(Recoverer); ok {
-			return r.PrepareRecovery(ctx, j.RequestID.String())
+			return r.PrepareRecovery(ctx, j.RequestID.String(), resumeActorID)
 		}
 	}
 	return w.Flow.Prepare(ctx, j.RequestID.String())
 }
 
-// isRevalidationRejection: approval/revisi/izin tidak lagi sah. Berbeda dari gangguan sementara
-// (database platform mati), penolakan ini tidak akan berubah jika diulang.
 func isRevalidationRejection(err error) bool {
 	var ce *contracts.Error
 	if errors.As(err, &ce) {
@@ -330,7 +326,7 @@ func spec(j *jobs.Job, p workflow.Plan) batch.Spec {
 	return sp
 }
 
-func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, lost *atomic.Bool, cancel context.CancelFunc) (batch.Progress, error) {
+func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, resumeActorID int64, lost *atomic.Bool, cancel context.CancelFunc) (batch.Progress, error) {
 	prog := batch.Progress{Batches: j.CommittedBatches, Rows: j.CommittedRows, Total: j.TotalRows}
 	if err := w.checkJobPosition(ctx, j, plan); err != nil {
 		return prog, err
@@ -338,6 +334,16 @@ func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, l
 	tgt, err := w.verifiedTarget(ctx, j, plan, false)
 	if err != nil {
 		return prog, err
+	}
+	var revalidate func(context.Context) error
+	if f, ok := w.Flow.(Revalidator); ok {
+		revalidate = func(ctx context.Context) error {
+			if err := w.checkJobPosition(ctx, j, plan); err != nil {
+				return err
+			}
+			recovery := j.Kind != jobs.KindRun || j.Hold != jobs.HoldNone
+			return f.Revalidate(ctx, j.RequestID.String(), recovery, resumeActorID)
+		}
 	}
 	if tgt.DBMS == dbconn.MariaDB && tgt.Maria != nil {
 		if plan.Mode == "batch" {
@@ -355,28 +361,17 @@ func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, l
 				return p, batch.ErrCommitUnknown
 			}
 		}
-		revalidate := func(ctx context.Context) error {
-			if f, ok := w.Flow.(Revalidator); ok {
-				if err := w.checkJobPosition(ctx, j, plan); err != nil {
-					return err
-				}
-				return f.Revalidate(ctx, j.RequestID.String(), j.Kind != jobs.KindRun || j.Hold != jobs.HoldNone)
-			}
-			return nil
-		}
 		return migration.RunWorkflowMaria(ctx, tgt, j.RootID, spec(j, plan).Op, plan.SQL, revalidate, func(ctx context.Context) error { return jobs.MarkDispatched(ctx, w.DB, j.ID, w.ID) }, spec(j, plan).Binding, plan.TargetServer)
 	}
 	if tgt.DBMS != dbconn.PostgreSQL || tgt.Postgres == nil {
 		return prog, errUnsupportedTarget
 	}
 	r := &batch.Runner{Pool: tgt.Postgres, LockWait: w.LockWait, StatementTimeout: w.StatementTimeout, Hooks: w.Hooks, ReconcileWait: w.ReconcileWait, EvidenceKey: tgt.EvidenceKey, TargetServer: plan.TargetServer,
-		Arm: func(ctx context.Context) error { return jobs.MarkDispatched(ctx, w.DB, j.ID, w.ID) }}
-	if f, ok := w.Flow.(Revalidator); ok {
-		r.Revalidate = func(ctx context.Context) error {
-			if err := w.checkJobPosition(ctx, j, plan); err != nil {
-				return err
-			}
-			return f.Revalidate(ctx, j.RequestID.String(), j.Kind != jobs.KindRun || j.Hold != jobs.HoldNone)
+		Revalidate: revalidate,
+		Arm:        func(ctx context.Context) error { return jobs.MarkDispatched(ctx, w.DB, j.ID, w.ID) }}
+	if _, ok := w.Flow.(atomicFlow); ok {
+		r.RecordSQL = func(ctx context.Context, sql string) error {
+			return jobs.RecordExecutionSQL(ctx, w.DB, j.ID, w.ID, telemetry.From(ctx).ExecutionID, sql)
 		}
 	}
 	if w.Metrics != nil {
@@ -421,13 +416,10 @@ func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, l
 	return p, err
 }
 
-// holdFor menentukan keadaan database setelah attempt tidak selesai: batch yang sudah committed
-// meninggalkan partial (atau partially_reverted pada kompensasi).
 func holdFor(j *jobs.Job, prog batch.Progress, err error) (hold, attemptStatus string) {
 	switch {
 	case errors.Is(err, batch.ErrCommitUnknown),
-		// commit_unknown baru berakhir setelah bukti di target berhasil dibaca; selama target belum
-		// bisa dikunci, keadaan itu tetap berlaku.
+
 		j.Hold == jobs.HoldCommitUnknown:
 		return jobs.HoldCommitUnknown, "commit_unknown"
 	case j.Kind == jobs.KindCompensate && (prog.Batches > 0 || errors.Is(err, batch.ErrUnsafe)):
@@ -499,8 +491,6 @@ func (w *Worker) finish(ctx context.Context, j *jobs.Job, exec string, prog batc
 	telemetry.Event(ctx, slog.LevelInfo, "job.finished", outcome, slog.String("hold", hold))
 }
 
-// retry menjadwalkan ulang job, atau menandainya failed bila jatah retry habis. Dipanggil hanya
-// setelah attempt (jika ada) tercatat hasilnya.
 func (w *Worker) retry(ctx context.Context, j *jobs.Job, hold string, cause error, lost *atomic.Bool) {
 	if lost.Load() {
 		return
@@ -521,8 +511,6 @@ func (w *Worker) retry(ctx context.Context, j *jobs.Job, hold string, cause erro
 	telemetry.Event(ctx, slog.LevelError, "job.finished", "failed", slog.String("hold", hold), slog.String("error", telemetry.RedactError(cause)))
 }
 
-// reject mencatat penolakan revalidasi sebagai attempt gagal (history mencatat semua attempt)
-// memakai snapshot plan saat enqueue, lalu menutup job tanpa menyentuh Target DB.
 func (w *Worker) reject(ctx context.Context, j *jobs.Job, snap workflow.Plan, cause error, lost *atomic.Bool) {
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
@@ -537,7 +525,9 @@ func (w *Worker) reject(ctx context.Context, j *jobs.Job, snap workflow.Plan, ca
 		return
 	}
 	if err := w.completeAttempt(fctx, j, exec, status, msg, func(q jobs.Querier) error { return jobs.Fail(fctx, q, j.ID, w.ID, hold, msg) }); err == nil && !lost.Load() {
-		telemetry.Event(ctx, slog.LevelWarn, "job.rejected", "failed")
+		info := telemetry.From(ctx)
+		info.ExecutionID, info.Attempt = exec, attemptNo
+		telemetry.Event(telemetry.With(ctx, info), slog.LevelWarn, "job.rejected", "failed")
 	}
 
 }

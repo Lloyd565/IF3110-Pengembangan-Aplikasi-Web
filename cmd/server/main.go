@@ -35,7 +35,7 @@ func main() {
 	slog.SetDefault(slog.New(handler))
 	log.SetOutput(slog.NewLogLogger(handler, slog.LevelInfo).Writer())
 	log.SetFlags(0)
-	// Production hanya memakai env asli; .env khusus pengembangan lokal.
+
 	if os.Getenv("APP_ENV") != "production" {
 		if err := godotenv.Load(); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			log.Fatalf("gagal membaca .env: %v", err)
@@ -51,7 +51,7 @@ func main() {
 	if err != nil {
 		log.Fatal("PLATFORM_DATABASE_URL tidak valid")
 	}
-	pool, err := pgxpool.NewWithConfig(context.Background(), telemetry.Install(poolCfg)) // semua SQL platform tercatat
+	pool, err := pgxpool.NewWithConfig(context.Background(), telemetry.Install(poolCfg))
 	if err != nil {
 		log.Fatal("PLATFORM_DATABASE_URL tidak valid")
 	}

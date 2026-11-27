@@ -8,19 +8,16 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
 )
 
-func (s *Service) Revalidate(ctx context.Context, requestID string, recovery bool) error {
+func (s *Service) Revalidate(ctx context.Context, requestID string, recovery bool, resumeActorID int64) error {
 	if recovery {
-		_, err := s.PrepareRecovery(ctx, requestID)
+		_, err := s.PrepareRecovery(ctx, requestID, resumeActorID)
 		return err
 	}
 	_, err := s.Prepare(ctx, requestID)
 	return err
 }
 
-// PrepareRecovery merevalidasi pengajuan untuk resume job yang tertahan (partial atau
-// commit_unknown). Berbeda dari Prepare, penahan posisi tidak ikut diperiksa karena justru
-// itulah yang sedang dipulihkan; approval seluruh leader, revisi, dan izin eksekusi tetap wajib sah.
-func (s *Service) PrepareRecovery(ctx context.Context, requestID string) (Plan, error) {
+func (s *Service) PrepareRecovery(ctx context.Context, requestID string, resumeActorID int64) (Plan, error) {
 	id, err := parseUUID(requestID)
 	if err != nil {
 		return Plan{}, err
@@ -42,7 +39,10 @@ func (s *Service) PrepareRecovery(ctx context.Context, requestID string) (Plan, 
 	if err := s.validateTarget(ctx, s.DB, x.connID, &x, false); err != nil {
 		return Plan{}, err
 	}
-	actor := reqctx.Principal{UserID: *x.queuedBy}
+	if resumeActorID == 0 {
+		resumeActorID = *x.queuedBy
+	}
+	actor := reqctx.Principal{UserID: resumeActorID}
 	if err := authz.CanUsing(ctx, s.DB, actor, x.connID, authz.MigrationExecute); err != nil {
 		if errors.Is(err, authz.ErrForbidden) {
 			return Plan{}, forbidden("Pengguna yang mengirim ke queue tidak lagi memiliki izin eksekusi.")

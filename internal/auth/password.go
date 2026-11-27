@@ -66,7 +66,7 @@ func VerifyPassword(encoded, password string) bool {
 		return false
 	}
 	memory, rounds, threads := uint32(values[0]), uint32(values[1]), uint8(p)
-	// Reject malformed/corrupt records before allocating memory or doing expensive work.
+
 	if memory < 8*uint32(threads) || memory > 128*1024 || rounds == 0 || rounds > 6 {
 		return false
 	}

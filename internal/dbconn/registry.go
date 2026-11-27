@@ -23,7 +23,6 @@ import (
 
 var ErrUnknownConnection = errors.New("dbconn: koneksi tidak terdaftar")
 
-// Params: parameter koneksi ke Target DB. Password hanya ada di memori.
 type Params struct {
 	Host     string
 	Port     int
@@ -49,7 +48,6 @@ func (p Params) url() string {
 	return u.String()
 }
 
-// Connect membuka pool kecil ke Target DB dan memastikan koneksinya hidup.
 func Connect(ctx context.Context, p Params) (*pgxpool.Pool, error) {
 	kind, err := NormalizeDBMS(p.DBMS)
 	if err != nil || kind != PostgreSQL {
@@ -61,7 +59,7 @@ func Connect(ctx context.Context, p Params) (*pgxpool.Pool, error) {
 	}
 	cfg.ConnConfig.RuntimeParams["standard_conforming_strings"] = "on"
 	cfg.MaxConns = 4
-	telemetry.Install(cfg) // seluruh SQL ke target (termasuk read-only explorer) tercatat sebagai log dan span
+	telemetry.Install(cfg)
 	cfg.ConnConfig.ConnectTimeout = 5 * time.Second
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
@@ -77,7 +75,6 @@ func Connect(ctx context.Context, p Params) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// Check: untuk tombol "Test connection". Tidak menyimpan apa pun.
 func Check(ctx context.Context, p Params) error {
 	pool, err := ConnectTarget(ctx, p)
 	if err != nil {
@@ -87,8 +84,6 @@ func Check(ctx context.Context, p Params) error {
 	return nil
 }
 
-// Registry menyimpan satu pool per koneksi Target DB. Password dibaca dari
-// Platform DB dan didekripsi saat pool pertama kali dibuat.
 type Registry struct {
 	DB  *pgxpool.Pool
 	Key []byte
@@ -114,7 +109,6 @@ func (r *Registry) key() ([]byte, error) {
 	return r.Key, nil
 }
 
-// Seal mengenkripsi password koneksi sebelum disimpan di db
 func (r *Registry) Seal(connID uuid.UUID, password string) ([]byte, error) {
 	key, err := r.key()
 	if err != nil {
@@ -249,7 +243,6 @@ func (r *Registry) devFallback() (*pgxpool.Pool, error) {
 	return r.dev, nil
 }
 
-// Invalidate menutup pool lama setelah koneksi diubah atau dihapus.
 func (r *Registry) Invalidate(connID uuid.UUID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

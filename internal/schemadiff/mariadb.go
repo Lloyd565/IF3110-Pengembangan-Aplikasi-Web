@@ -55,7 +55,7 @@ func readMaria(ctx context.Context, target *dbconn.Target, schema string) (Snaps
 	if err != nil {
 		return out, err
 	}
-	// Hold metadata locks on ordinary tables until the read transaction ends.
+
 	for _, t := range out.Tables {
 		if len(t.Manual) > 0 {
 			continue

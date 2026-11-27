@@ -5,32 +5,103 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
 
-func (r *Runner) proof(ctx context.Context, q queryer, sp Spec) ([]byte, error) {
-	var state string
-	err := q.QueryRow(ctx, `SELECT jsonb_build_array(
-  (SELECT jsonb_build_array(scope_max,total_rows,finished_at IS NOT NULL)
-   FROM _platform.migration_runs WHERE root_job=$1 AND op=$2),
-  (SELECT jsonb_agg(jsonb_build_array(batch_no,cursor_from,cursor_to,rows_affected,row_manifest) ORDER BY batch_no)
-   FROM _platform.migration_checkpoints WHERE root_job=$1 AND op=$2))::text`, sp.RootID, sp.Op).Scan(&state)
+const (
+	proofV2 byte = 2
+	proofV3 byte = 3
+)
+
+func (r *Runner) proof(ctx context.Context, q queryer, sp Spec, version byte) ([]byte, error) {
+	manifest := "manifest_digest"
+	if version == proofV2 {
+		manifest = "row_manifest"
+	}
+	mac := hmac.New(sha256.New, r.EvidenceKey)
+	io.WriteString(mac, strings.Join([]string{"pg-v" + strconv.Itoa(int(version)), sp.Binding, strconv.FormatInt(sp.RootID, 10), sp.Op, ""}, "\x00"))
+	if err := streamState(ctx, q, mac, `
+SELECT digest FROM (
+  SELECT 0 AS section, 0 AS seq, sha256(convert_to(coalesce((
+    SELECT jsonb_build_array(scope_max,total_rows,finished_at IS NOT NULL)::text
+    FROM _platform.migration_runs WHERE root_job=$1 AND op=$2), 'null'), 'UTF8')) AS digest
+  UNION ALL
+  SELECT 1, batch_no, sha256(convert_to(jsonb_build_array(batch_no,cursor_from,cursor_to,rows_affected,`+manifest+`)::text, 'UTF8'))
+    FROM _platform.migration_checkpoints WHERE root_job=$1 AND op=$2
+) states ORDER BY section, seq`, sp.RootID, sp.Op); err != nil {
+		return nil, err
+	}
+	return mac.Sum([]byte{version}), nil
+}
+
+func (r *Runner) legacyProof(ctx context.Context, q queryer, sp Spec) ([]byte, error) {
+	mac := hmac.New(sha256.New, r.EvidenceKey)
+	io.WriteString(mac, strings.Join([]string{"pg-v1", sp.Binding, strconv.FormatInt(sp.RootID, 10), sp.Op, ""}, "\x00"))
+	var run string
+	if err := q.QueryRow(ctx, `SELECT coalesce((SELECT jsonb_build_array(scope_max,total_rows,finished_at IS NOT NULL)::text
+    FROM _platform.migration_runs WHERE root_job=$1 AND op=$2), 'null')`, sp.RootID, sp.Op).Scan(&run); err != nil {
+		return nil, err
+	}
+	io.WriteString(mac, "["+run+", ")
+	rows, err := q.Query(ctx, `SELECT jsonb_build_array(batch_no,cursor_from,cursor_to,rows_affected,row_manifest)::text
+    FROM _platform.migration_checkpoints WHERE root_job=$1 AND op=$2 ORDER BY batch_no`, sp.RootID, sp.Op)
 	if err != nil {
 		return nil, err
 	}
-	mac := hmac.New(sha256.New, r.EvidenceKey)
-	mac.Write([]byte(strings.Join([]string{"pg-v1", sp.Binding, strconv.FormatInt(sp.RootID, 10), sp.Op, state}, "\x00")))
+	defer rows.Close()
+	first := true
+	for rows.Next() {
+		var checkpoint []byte
+		if err := rows.Scan(&checkpoint); err != nil {
+			return nil, err
+		}
+		if first {
+			io.WriteString(mac, "[")
+			first = false
+		} else {
+			io.WriteString(mac, ", ")
+		}
+		mac.Write(checkpoint)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if first {
+		io.WriteString(mac, "null")
+	} else {
+		io.WriteString(mac, "]")
+	}
+	io.WriteString(mac, "]")
 	return mac.Sum(nil), nil
+}
+
+func streamState(ctx context.Context, q queryer, dst io.Writer, sql string, args ...any) error {
+	rows, err := q.Query(ctx, sql, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var digest []byte
+		if err := rows.Scan(&digest); err != nil {
+			return err
+		}
+		if _, err := dst.Write(digest); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 func (r *Runner) seal(ctx context.Context, q queryer, sp Spec) error {
 	if len(r.EvidenceKey) == 0 {
 		return nil
 	}
-	proof, err := r.proof(ctx, q, sp)
+	proof, err := r.proof(ctx, q, sp, proofV3)
 	if err != nil {
 		return err
 	}
@@ -64,7 +135,15 @@ func (r *Runner) verify(ctx context.Context, q queryer, sp Spec, allowNew bool) 
 		}
 		return err
 	}
-	expected, err := r.proof(ctx, q, sp)
+	var expected []byte
+	switch {
+	case len(existing) == sha256.Size:
+		expected, err = r.legacyProof(ctx, q, sp)
+	case len(existing) == sha256.Size+1 && (existing[0] == proofV2 || existing[0] == proofV3):
+		expected, err = r.proof(ctx, q, sp, existing[0])
+	default:
+		return fmt.Errorf("%w: format bukti target tidak dikenal", ErrCommitUnknown)
+	}
 	if err != nil {
 		return err
 	}
@@ -98,15 +177,21 @@ func (r *Runner) controlState(ctx context.Context, q queryer) (string, error) {
 	if err := trustedControl(ctx, q); err != nil {
 		return "", err
 	}
-	var state string
-	err := q.QueryRow(ctx, `SELECT encode(sha256(convert_to(jsonb_build_array(
-  (SELECT jsonb_agg(to_jsonb(r) ORDER BY root_job,op) FROM _platform.migration_runs r),
-  (SELECT jsonb_agg(to_jsonb(c) ORDER BY root_job,op,batch_no) FROM _platform.migration_checkpoints c),
-  (SELECT jsonb_agg(to_jsonb(s) ORDER BY root_job,op) FROM _platform.migration_seals s),
-  (SELECT jsonb_agg(jsonb_build_array(c.oid,c.relname,c.relkind,c.relowner,c.relacl,c.relrowsecurity,c.relforcerowsecurity,c.relhasrules,c.relhastriggers) ORDER BY c.oid)
-   FROM pg_class c WHERE c.relnamespace='_platform'::regnamespace)
- )::text,'UTF8')),'hex')`).Scan(&state)
-	return state, err
+	hash := sha256.New()
+	err := streamState(ctx, q, hash, `
+SELECT digest FROM (
+  SELECT 0 AS section, root_job, op, 0 AS seq, sha256(convert_to(to_jsonb(r)::text,'UTF8')) AS digest FROM _platform.migration_runs r
+  UNION ALL
+  SELECT 1, root_job, op, batch_no, sha256(convert_to(jsonb_build_array(root_job,op,batch_no,cursor_from,cursor_to,
+     rows_affected,committed_at,manifest_digest)::text,'UTF8')) FROM _platform.migration_checkpoints c
+  UNION ALL
+  SELECT 2, root_job, op, 0, sha256(convert_to(to_jsonb(s)::text,'UTF8')) FROM _platform.migration_seals s
+  UNION ALL
+  SELECT 3, c.oid::bigint, '', 0, sha256(convert_to(jsonb_build_array(c.oid,c.relname,c.relkind,c.relowner,c.relacl,
+     c.relrowsecurity,c.relforcerowsecurity,c.relhasrules,c.relhastriggers,c.relnatts)::text,'UTF8'))
+  FROM pg_catalog.pg_class c WHERE c.relnamespace='_platform'::regnamespace
+) states ORDER BY section, root_job, op, seq`)
+	return string(hash.Sum(nil)), err
 }
 
 func (r *Runner) checkControl(ctx context.Context, q queryer, before string) error {

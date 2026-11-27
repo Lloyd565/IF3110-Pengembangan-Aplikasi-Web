@@ -1,5 +1,3 @@
-// Package admin: operasi Platform Admin (user, group, koneksi, grant).
-// Pemeriksaan "pemanggil adalah admin" dilakukan di lapisan handler (requireAdmin);
 package admin
 
 import (
@@ -96,7 +94,6 @@ func (s *Service) CreateUser(ctx context.Context, actor int64, username, passwor
 	return id, nil
 }
 
-// SetUserActive: menonaktifkan user langsung mencabut semua session-nya di backend.
 func (s *Service) SetUserActive(ctx context.Context, actor, id int64, active bool) error {
 	if !active && id == actor {
 		return ErrSelf
@@ -139,7 +136,6 @@ func (s *Service) ResetPassword(ctx context.Context, actor, id int64, newPasswor
 	return nil
 }
 
-// SetAdmin: privilege naik -> session user itu dirotasi pada request berikutnya.
 func (s *Service) SetAdmin(ctx context.Context, actor, id int64, admin bool) error {
 	if !admin && id == actor {
 		return ErrSelf
@@ -232,7 +228,6 @@ func (s *Service) Members(ctx context.Context, groupID int64) ([]Member, error) 
 	return out, rows.Err()
 }
 
-// AddMember: jika group sudah punya grant, privilege user naik -> force_rotate.
 func (s *Service) AddMember(ctx context.Context, actor, groupID, userID int64) error {
 	_, err := s.DB.Exec(ctx,
 		`INSERT INTO group_members (group_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, groupID, userID)
@@ -270,8 +265,6 @@ func (s *Service) RemoveMember(ctx context.Context, actor, groupID, userID int64
 	return nil
 }
 
-// ---- Koneksi ----
-
 type Connection struct {
 	ID       uuid.UUID
 	Name     string
@@ -279,7 +272,7 @@ type Connection struct {
 	Port     int
 	DBName   string
 	Username string
-	SSLMode  string // password sengaja tidak pernah ikut keluar
+	SSLMode  string
 	DBMS     dbconn.DBMS
 }
 
@@ -340,7 +333,6 @@ func (s *Service) CreateConnection(ctx context.Context, actor int64, name string
 	return id, nil
 }
 
-// UpdateConnection: password kosong = pertahankan password lama.
 func (s *Service) UpdateConnection(ctx context.Context, actor int64, id uuid.UUID, name string, p dbconn.Params) error {
 	if err := normalize(name, &p); err != nil {
 		return err
@@ -385,7 +377,6 @@ func (s *Service) UpdateConnection(ctx context.Context, actor int64, id uuid.UUI
 	return nil
 }
 
-// DeleteConnection: soft delete agar riwayat migration tetap ada.
 func (s *Service) DeleteConnection(ctx context.Context, actor int64, id uuid.UUID) error {
 	tag, err := s.DB.Exec(ctx,
 		`UPDATE db_connections SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL`, id)
@@ -419,7 +410,6 @@ func (s *Service) ListConnections(ctx context.Context) ([]Connection, error) {
 	return out, rows.Err()
 }
 
-// TestConnection: untuk tombol "Test connection" pada form.
 func (s *Service) TestConnection(ctx context.Context, p dbconn.Params) error {
 	if err := normalize("x", &p); err != nil {
 		return err
@@ -432,10 +422,9 @@ type Grant struct {
 	GroupName      string
 	ConnectionID   uuid.UUID
 	ConnectionName string
-	Level          string // "view" atau "edit"
+	Level          string
 }
 
-// SetGrant: grant baru atau level naik -> semua anggota group di-force_rotate.
 func (s *Service) SetGrant(ctx context.Context, actor, groupID int64, connID uuid.UUID, level string) error {
 	if level != "view" && level != "edit" {
 		return invalid("level harus view atau edit")

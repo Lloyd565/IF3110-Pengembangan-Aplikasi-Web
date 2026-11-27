@@ -267,7 +267,7 @@ func TestLegacyBackfill(t *testing.T) {
 	if _, err := db.Exec(ctx, `
 		DROP TABLE migration_approvals, migration_requests, migration_executions, migration_revisions, group_leaders CASCADE;
 		DROP FUNCTION migration_revisions_immutable, migration_executions_guard;
-		DELETE FROM schema_migrations WHERE version = '0003_workflow';
+		DELETE FROM schema_migrations WHERE version IN ('0003_workflow', '0008_executed_sql', '0009_sql_dispatch_tracking');
 		INSERT INTO users (id, username, password_hash) VALUES (1,'budi','x');
 		INSERT INTO db_connections (id, name, host, port, dbname, username, password_enc)
 			VALUES ('aaaaaaaa-0000-0000-0000-000000000001','A','h',5432,'d','u','\x00');
@@ -295,7 +295,8 @@ func TestLegacyBackfill(t *testing.T) {
 		}
 	}
 	h := must[[]contracts.Execution](t)(s.History(ctx, p, conn, false))
-	if len(h) != 2 || h[0].MigrationName != "v1" || h[0].Status != "success" || h[1].Status != "failed" || h[0].SQL != "CREATE TABLE a (id int)" {
+	if len(h) != 2 || h[0].MigrationName != "v1" || h[0].Status != "success" || h[1].Status != "failed" ||
+		h[0].SQL != "CREATE TABLE a (id int)" || h[0].SQLSource != "stored" {
 		t.Fatalf("history legacy = %+v", h)
 	}
 	var dbDigest string
@@ -307,9 +308,6 @@ func TestLegacyBackfill(t *testing.T) {
 	}
 }
 
-// Upgrade 0007: execution era M1 (tanpa job worker) tetap bisa di-rollback. Execution worker yang
-// identitas targetnya kosong hanya bisa berasal dari build antara yang belum rilis; tanpa bukti
-// identitas, rollback/forward ditolak dengan jelas alih-alih menebak target.
 func TestLegacyExecutionIdentityOnUpgrade(t *testing.T) {
 	s, _, db := setup(t, "workflow_legacy_identity")
 	ctx := context.Background()
@@ -317,7 +315,7 @@ func TestLegacyExecutionIdentityOnUpgrade(t *testing.T) {
 	ap := approveAll(t, s, contracts.ChangeInput{MigrationID: m.ID, RevisionID: m.RevisionID, Action: "apply"}, alice, bob)
 	must[contracts.Job](t)(s.Enqueue(ctx, carol, conn, ap.ID, "key-legacy"))
 	e := run(t, s, ap.ID, "success")
-	// Simulasi baris sebelum 0007: identitas target kosong. Guard trigger dimatikan seperti di 0007.
+
 	legacy := func(job any) {
 		t.Helper()
 		err := pgx.BeginFunc(ctx, db, func(tx pgx.Tx) error {

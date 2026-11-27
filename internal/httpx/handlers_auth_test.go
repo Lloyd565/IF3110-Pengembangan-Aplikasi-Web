@@ -36,7 +36,7 @@ func TestIntegrationLoginAccessLogout(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := s.Routes()
-	t.Setenv("DEV_USER_ID", "1") // The former development bypass must have no effect.
+	t.Setenv("DEV_USER_ID", "1")
 	request := func(method, path string, form url.Values, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(method, "https://example.test"+path, strings.NewReader(form.Encode()))
@@ -94,7 +94,7 @@ func TestIntegrationLoginAccessLogout(t *testing.T) {
 		t.Fatalf("login: %d", w.Code)
 	}
 	cookie := findCookie(w, s.sessionCookieName())
-	// Ignore the earlier deletion cookie when an invalid incoming ID was cleared.
+
 	for _, c := range w.Result().Cookies() {
 		if c.Name == s.sessionCookieName() && c.Value != "" {
 			cookie = c

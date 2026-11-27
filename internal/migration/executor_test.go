@@ -353,7 +353,7 @@ func TestExecute(t *testing.T) {
 		run := r.run
 		r.run = func(ctx context.Context, id int64, sql string) error {
 			err := run(ctx, id, sql)
-			// Simulasikan platform DB menolak update status.
+
 			e.platform.Exec(ctx, `ALTER TABLE migrations ADD CONSTRAINT block_settle CHECK (status <> 'success') NOT VALID`)
 			return err
 		}

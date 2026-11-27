@@ -60,8 +60,6 @@ func (s *Sessions) CompareAndSwap(ctx context.Context, old, next Session) (bool,
 	return tag.RowsAffected() == 1, err
 }
 
-// Expire rechecks the live row atomically so a stale snapshot cannot revoke a
-// session that was just refreshed by another request. idleCutoff is now-idleTTL.
 func (s *Sessions) Expire(ctx context.Context, id int64, now, idleCutoff time.Time) (bool, error) {
 	tag, err := s.DB.Exec(ctx, `UPDATE sessions s SET revoked_at = $2
 		WHERE s.id = $1 AND s.revoked_at IS NULL AND

@@ -9,7 +9,6 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 )
 
-// User melihat group miliknya sendiri di dashboard, tetapi tidak group atau anggota milik orang lain.
 func TestDashboardShowsOwnGroupsOnly(t *testing.T) {
 	e := admSetup(t)
 	ctx := context.Background()

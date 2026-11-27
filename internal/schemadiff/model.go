@@ -1,5 +1,3 @@
-// Package schemadiff reads catalog snapshots and produces reviewable DDL plans.
-// It never executes DDL. Unsupported metadata blocks automatic draft creation.
 package schemadiff
 
 import (
@@ -38,14 +36,14 @@ type Column struct {
 	SerialDefaultOverride                                bool
 	Sequence                                             string `json:"-"`
 	Manual                                               string
-	Comment                                              string `json:"-"` // Preserve existing MariaDB comments during MODIFY; comments are outside diff scope.
+	Comment                                              string `json:"-"`
 }
 
 type Constraint struct {
 	Name, Kind                                       string
 	Columns                                          []string
 	Include                                          []string
-	RefSchema, RefTable                              string // Empty RefSchema means the selected schema itself.
+	RefSchema, RefTable                              string
 	RefColumns                                       []string
 	DeleteColumns                                    []string
 	Update, Delete, Match, Check                     string

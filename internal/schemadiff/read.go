@@ -9,8 +9,6 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/dbconn"
 )
 
-// Read captures a repeatable-read, read-only catalog snapshot. Data, row counts,
-// sequence counters, owners, comments and grants are outside the comparison.
 func Read(ctx context.Context, target *dbconn.Target, schema string) (Snapshot, error) {
 	if schema == "" || strings.ContainsRune(schema, 0) {
 		return Snapshot{}, ErrNotFound

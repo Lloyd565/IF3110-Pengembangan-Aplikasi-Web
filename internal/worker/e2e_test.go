@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,9 +19,6 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/testdb"
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/workflow"
 )
-
-// Test ini menjalankan worker bersama workflow.Service yang asli (approval leader, history
-// attempt, posisi database), bukan fake, untuk membuktikan kontrak kedua modul cocok.
 
 var (
 	alice = reqctx.Principal{UserID: 1, Username: "alice"}
@@ -58,7 +56,7 @@ func newE2E(t *testing.T, name string) *e2e {
 	svc := &workflow.Service{DB: db, Authz: az, Queue: jobs.Queue{}}
 	target := newTarget(t, name+"_target")
 	targets := &env{t: t, platform: db, targets: map[uuid.UUID]*pgxpool.Pool{connA: target}, flow: &fakeFlow{}}
-	w := &Worker{DB: db, Flow: svc, Targets: targets, ID: "e2e", Lease: 600 * time.Millisecond, Poll: 10 * time.Millisecond,
+	w := &Worker{DB: db, Flow: svc, Targets: targets, ID: "e2e", Lease: 5 * time.Second, Poll: 10 * time.Millisecond,
 		LockWait: 300 * time.Millisecond, ReconcileWait: 300 * time.Millisecond, Backoff: func(int) time.Duration { return 0 }}
 	return &e2e{t: t, db: db, target: target, svc: svc, js: &jobs.Service{DB: db, Authz: az, Flow: svc}, w: w}
 }
@@ -76,7 +74,6 @@ func (e *e2e) save(up, down string) contracts.Migration {
 	return m
 }
 
-// approved membuat pengajuan lalu menyetujuinya oleh kedua leader (alice untuk group app, bob untuk ro).
 func (e *e2e) approved(in contracts.ChangeInput) contracts.ChangeRequest {
 	ctx := context.Background()
 	x, err := e.svc.Propose(ctx, carol, connA, in)
@@ -138,7 +135,7 @@ func TestEndToEndApplyThenRollbackThroughRealWorkflow(t *testing.T) {
 	if e.bal() != "map[100:1000]" {
 		t.Fatal("enqueue tidak boleh menjalankan SQL di request")
 	}
-	// enqueue ulang (retry klien, kunci berbeda) tidak membuat job kedua.
+
 	if again, err := e.svc.Enqueue(context.Background(), alice, connA, x.ID, "key-lain-12345"); err != nil || again.ID != job.ID {
 		t.Fatalf("enqueue ulang harus mengembalikan job yang sama: %+v err=%v", again, err)
 	}
@@ -152,11 +149,11 @@ func TestEndToEndApplyThenRollbackThroughRealWorkflow(t *testing.T) {
 		t.Fatalf("balance = %s", e.bal())
 	}
 	h := e.history(false)
-	if len(h) != 1 || h[0].Status != "success" || h[0].Action != "apply" || h[0].SQL != upSQL {
+	if len(h) != 1 || h[0].Status != "success" || h[0].Action != "apply" ||
+		!strings.Contains(h[0].SQL, "RETURNING accounts.id, accounts.xmin::text, accounts.ctid::text") {
 		t.Fatalf("history harus memuat attempt sukses dengan SQL yang dijalankan: %+v", h)
 	}
 
-	// rollback melalui jalur yang sama: pengajuan baru, approval, queue, worker.
 	rb := e.approved(batchInput(m, "rollback", h[0].ID))
 	rbJob := e.enqueue(rb)
 	e.drain()
@@ -166,7 +163,8 @@ func TestEndToEndApplyThenRollbackThroughRealWorkflow(t *testing.T) {
 	if e.bal() != "map[100:1000]" {
 		t.Fatalf("setelah rollback balance = %s", e.bal())
 	}
-	if full := e.history(false); len(full) != 2 || full[1].RevertsExecutionID != h[0].ID {
+	if full := e.history(false); len(full) != 2 || full[1].RevertsExecutionID != h[0].ID ||
+		!strings.Contains(full[1].SQL, "accounts.id = ANY(") {
 		t.Fatalf("history lengkap harus memuat apply dan rollback yang merujuk execution-nya: %+v", full)
 	}
 	if hidden := e.history(true); len(hidden) != 0 {
@@ -174,7 +172,6 @@ func TestEndToEndApplyThenRollbackThroughRealWorkflow(t *testing.T) {
 	}
 }
 
-// Contoh Hide rollback di spek: apply [E2], rollback [E3] tersembunyi, forward [E4] tetap terlihat.
 func TestEndToEndForwardAfterRollbackStaysVisibleWhenPairIsHidden(t *testing.T) {
 	e := newE2E(t, "e2e_forward")
 	m := e.save(upSQL, downSQL)
@@ -188,8 +185,26 @@ func TestEndToEndForwardAfterRollbackStaysVisibleWhenPairIsHidden(t *testing.T) 
 	}
 	rollbackID := e.history(false)[1].ID
 
-	// forward menerapkan kembali satu langkah dan tidak menjalankan migration berikutnya.
-	fw := e.enqueue(e.approved(batchInput(m, "forward", rollbackID)))
+	ctx := context.Background()
+	stale, err := e.svc.Propose(ctx, carol, connA, contracts.ChangeInput{
+		MigrationID: m.ID, RevisionID: m.RevisionID, Action: "forward", TargetExecutionID: rollbackID,
+	})
+	e.must(err)
+	_, err = e.db.Exec(ctx, `UPDATE migration_requests SET mode='normal',batch_size=0,cursor_column='',scope='' WHERE id=$1::uuid`, stale.ID)
+	e.must(err)
+	stale, err = e.svc.Request(ctx, carol, connA, stale.ID)
+	e.must(err)
+	if stale.CanSubmit || len(stale.Validation) == 0 {
+		t.Fatalf("legacy draft must explain why a fresh proposal is required: %+v", stale)
+	}
+
+	proposal := e.approved(contracts.ChangeInput{
+		MigrationID: m.ID, RevisionID: m.RevisionID, Action: "forward", TargetExecutionID: rollbackID, Mode: "normal",
+	})
+	if proposal.Mode != "batch" || proposal.BatchSize != 100 || proposal.CursorColumn != "id" || proposal.Scope != "perf.accounts" {
+		t.Fatalf("forward should inherit the original batch configuration: %+v", proposal)
+	}
+	fw := e.enqueue(proposal)
 	e.drain()
 	if got := e.job(fw.ID); got.Status != "success" || got.CommittedRows != rows {
 		t.Fatalf("forward: %+v", got)
@@ -207,11 +222,53 @@ func TestEndToEndForwardAfterRollbackStaysVisibleWhenPairIsHidden(t *testing.T) 
 	}
 }
 
+func TestEndToEndFilteredBatchReportsActualTotal(t *testing.T) {
+	e := newE2E(t, "e2e_filtered_batch")
+	m := e.save(upSQL+" AND id % 2 = 0", downSQL+" AND id % 2 = 0")
+	job := e.enqueue(e.approved(batchInput(m, "apply", "")))
+	e.drain()
+
+	got := e.job(job.ID)
+	if got.Status != "success" || got.CommittedRows != rows/2 || got.TotalRows == nil || *got.TotalRows != got.CommittedRows {
+		t.Fatalf("finished job should report the actual affected row count: %+v", got)
+	}
+	if e.bal() != "map[100:500 101:500]" {
+		t.Fatalf("expected half the rows to change: %s", e.bal())
+	}
+}
+
+func TestEndToEndHistoryDistinguishesPlanFromDispatchedSQL(t *testing.T) {
+	e := newE2E(t, "e2e_sql_dispatch")
+	_, err := e.target.Exec(context.Background(), "TRUNCATE perf.accounts")
+	e.must(err)
+	empty := e.save(upSQL, downSQL)
+	job := e.enqueue(e.approved(batchInput(empty, "apply", "")))
+	e.drain()
+	if got := e.job(job.ID); got.Status != "success" || got.CommittedBatches != 0 {
+		t.Fatalf("empty batch job: %+v", got)
+	}
+	h := e.history(false)
+	if len(h) != 1 || h[0].SQL != "" || h[0].SQLSource != "not_dispatched" || h[0].PlannedSQL != upSQL {
+		t.Fatalf("empty batch should show the plan separately: %+v", h)
+	}
+
+	failed := e.save("SELECT 1 / 0", "SELECT 1")
+	job = e.enqueue(e.approved(contracts.ChangeInput{
+		MigrationID: failed.ID, RevisionID: failed.RevisionID, Action: "apply", Mode: "normal",
+	}))
+	e.drain()
+	h = e.history(false)
+	if len(h) != 2 || h[1].Status != "failed" || h[1].SQL != "SELECT 1 / 0" || h[1].SQLSource != "dispatched" ||
+		h[1].ID != e.job(job.ID).ExecutionID {
+		t.Fatalf("failed statement should be recorded as dispatched: %+v", h)
+	}
+}
+
 func TestEndToEndLeaderChangeBeforeWorkerRunsRejectsJobAndKeepsTargetUntouched(t *testing.T) {
 	e := newE2E(t, "e2e_leader")
 	m := e.save(upSQL, downSQL)
 	job := e.enqueue(e.approved(batchInput(m, "apply", "")))
-	// leader group app diganti setelah approval dan sebelum worker berjalan.
+
 	if _, err := e.db.Exec(context.Background(), `UPDATE group_leaders SET user_id = 3 WHERE group_id = 10`); err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +297,7 @@ func TestEndToEndPartialBlocksOthersThenCompensationNeedsNewApproval(t *testing.
 		return nil
 	}
 	job := e.enqueue(e.approved(batchInput(m, "apply", "")))
-	e.drain() // retry habis: partial
+	e.drain()
 	got := e.job(job.ID)
 	if got.Status != "partial" || got.CommittedBatches != 3 || !got.CanCompensate || !got.CanResume {
 		t.Fatalf("job harus partial dengan 3 batch: %+v", got)
@@ -250,7 +307,6 @@ func TestEndToEndPartialBlocksOthersThenCompensationNeedsNewApproval(t *testing.
 		t.Fatalf("history mencatat attempt partial: %+v", h)
 	}
 
-	// partial menahan migration lain.
 	other := e.save("SELECT 1", "SELECT 2")
 	blocked, err := e.svc.Propose(ctx, carol, connA, contracts.ChangeInput{MigrationID: other.ID, RevisionID: other.RevisionID, Action: "apply", Mode: "normal"})
 	e.must(err)
@@ -258,13 +314,12 @@ func TestEndToEndPartialBlocksOthersThenCompensationNeedsNewApproval(t *testing.
 		t.Fatalf("migration lain harus ditahan selama ada partial: %+v", blocked)
 	}
 
-	// kompensasi: pengajuan rollback baru, wajib disetujui lagi oleh seluruh leader.
 	req, err := e.js.Recover(ctx, carol, connA, job.ID, "compensate", "k-compensate-1")
 	e.must(err)
 	if req.Action != "rollback" || req.TargetExecutionID == "" || req.Mode != "batch" {
 		t.Fatalf("pengajuan kompensasi: %+v", req)
 	}
-	// klik ganda: pengajuan yang masih terbuka dikembalikan, tidak ada draf kedua.
+
 	if again, err := e.js.Recover(ctx, carol, connA, job.ID, "compensate", "k-compensate-2"); err != nil || again.ID != req.ID {
 		t.Fatalf("kompensasi kedua harus mengembalikan pengajuan yang sama: %+v err=%v", again, err)
 	}
@@ -299,7 +354,7 @@ func TestEndToEndPartialBlocksOthersThenCompensationNeedsNewApproval(t *testing.
 	if e.bal() != "map[100:1000]" {
 		t.Fatalf("seluruh batch yang committed harus dikembalikan: %s", e.bal())
 	}
-	// penahan terlepas: migration lain bisa diajukan lagi.
+
 	free, err := e.svc.Propose(ctx, carol, connA, contracts.ChangeInput{MigrationID: other.ID, RevisionID: other.RevisionID, Action: "apply", Mode: "normal"})
 	e.must(err)
 	if len(free.Validation) != 0 {
@@ -345,10 +400,10 @@ func TestEndToEndResumeFinishesRemainingBatchesOnly(t *testing.T) {
 		t.Fatalf("tidak boleh ada double commit: %s", e.bal())
 	}
 	h := e.history(false)
-	if h[len(h)-1].Status != "success" {
-		t.Fatalf("attempt resume yang sukses menjadi attempt terakhir: %+v", h)
+	if h[0].Actor != alice.Username || h[len(h)-1].Status != "success" || h[len(h)-1].Actor != carol.Username {
+		t.Fatalf("history must retain the original actor and credit the resumer: %+v", h)
 	}
-	// penahan terlepas setelah resume berhasil.
+
 	other := e.save("SELECT 1", "SELECT 2")
 	free, err := e.svc.Propose(ctx, carol, connA, contracts.ChangeInput{MigrationID: other.ID, RevisionID: other.RevisionID, Action: "apply", Mode: "normal"})
 	e.must(err)
@@ -369,8 +424,6 @@ func (e *e2e) submitApproved(id string) contracts.ChangeRequest {
 	return x
 }
 
-// BUG-02 dengan database nyata: kompensasi yang tertahan commit_unknown harus bisa dipulihkan lewat
-// kompensasi lanjutan (dengan approval baru), tanpa mengulang batch down yang sudah committed.
 func TestEndToEndCompensationStuckInCommitUnknownIsRecoverable(t *testing.T) {
 	e := newE2E(t, "e2e_comp_unknown")
 	ctx := context.Background()
@@ -390,7 +443,7 @@ func TestEndToEndCompensationStuckInCommitUnknownIsRecoverable(t *testing.T) {
 	req, err := e.js.Recover(ctx, carol, connA, apply.ID, "compensate", "k-comp-1")
 	e.must(err)
 	req = e.submitApproved(req.ID)
-	// koneksi kompensasi diputus di batch down kedua dan target tidak bisa dikunci: hasil commit tidak pasti.
+
 	var holder *pgxpool.Conn
 	var released bool
 	release := func() {
@@ -410,7 +463,7 @@ func TestEndToEndCompensationStuckInCommitUnknownIsRecoverable(t *testing.T) {
 				t.Fatal(err)
 			}
 			holder.Exec(ctx, `SELECT pg_advisory_lock(hashtext('if3110.migration'))`)
-			// Lepas juga saat test gagal lebih awal; kalau tidak, penutupan pool menunggu selamanya.
+
 			t.Cleanup(release)
 		}
 		return nil
@@ -425,7 +478,6 @@ func TestEndToEndCompensationStuckInCommitUnknownIsRecoverable(t *testing.T) {
 		t.Fatalf("kompensasi commit_unknown harus punya jalur kompensasi lanjutan: %+v", stuck)
 	}
 
-	// target kembali bisa dikunci; kompensasi lanjutan wajib disetujui lagi.
 	release()
 	e.w.Hooks.BeforeCommit = nil
 	next, err := e.js.Recover(ctx, carol, connA, comp.ID, "compensate", "k-comp-2")

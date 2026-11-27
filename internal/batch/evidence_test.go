@@ -2,6 +2,8 @@ package batch
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"errors"
 	"strings"
 	"testing"
@@ -23,8 +25,6 @@ func sealedRunner(t *testing.T, name string) (*Runner, func(string, ...any)) {
 	return &Runner{Pool: db, EvidenceKey: testKey}, exec
 }
 
-// Dengan EvidenceKey, run ulang (duplicate delivery) dan kompensasi tetap berjalan karena bukti
-// di-seal pada setiap commit dan diverifikasi sebelum dipakai.
 func TestSealedEvidenceRunResumeAndCompensate(t *testing.T) {
 	r, _ := sealedRunner(t, "ev_ok")
 	ctx := context.Background()
@@ -46,8 +46,49 @@ func TestSealedEvidenceRunResumeAndCompensate(t *testing.T) {
 	}
 }
 
-// Checkpoint yang diubah di luar platform (atau oleh SQL migration) tidak cocok dengan HMAC, jadi
-// worker berhenti di commit_unknown alih-alih mempercayai bukti palsu.
+func TestResumeWithLegacySeal(t *testing.T) {
+	r, exec := sealedRunner(t, "ev_legacy")
+	ctx := context.Background()
+	sp := batchSpec(1, OpUp, upSQL)
+	sp.Binding = "identity:server:nonce"
+	r.Hooks.BeforeCommit = func(_ string, n int) error {
+		if n == 3 {
+			return errors.New("stop before batch 3")
+		}
+		return nil
+	}
+	if progress, err := r.Run(ctx, sp, nil); err == nil || progress.Batches != 2 {
+		t.Fatalf("expected two committed batches: %+v, %v", progress, err)
+	}
+	r.Hooks = Hooks{}
+
+	var state string
+	if err := r.Pool.QueryRow(ctx, `SELECT jsonb_build_array(
+    (SELECT jsonb_build_array(scope_max,total_rows,finished_at IS NOT NULL)
+       FROM _platform.migration_runs WHERE root_job=1 AND op='up'),
+    (SELECT jsonb_agg(jsonb_build_array(batch_no,cursor_from,cursor_to,rows_affected,row_manifest) ORDER BY batch_no)
+       FROM _platform.migration_checkpoints WHERE root_job=1 AND op='up'))::text`).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	mac := hmac.New(sha256.New, testKey)
+	mac.Write([]byte(strings.Join([]string{"pg-v1", sp.Binding, "1", OpUp, state}, "\x00")))
+	exec(`UPDATE _platform.migration_seals SET proof=$1 WHERE root_job=1 AND op='up'`, mac.Sum(nil))
+
+	if progress, done, err := r.Evidence(ctx, sp); err != nil || done || progress.Batches != 2 {
+		t.Fatalf("expected legacy evidence to verify: %+v, %v, %v", progress, done, err)
+	}
+	if progress, err := r.Run(ctx, sp, nil); err != nil || progress.Batches != 10 || progress.Rows != rows {
+		t.Fatalf("expected resume from legacy evidence: %+v, %v", progress, err)
+	}
+	var proof []byte
+	if err := r.Pool.QueryRow(ctx, `SELECT proof FROM _platform.migration_seals WHERE root_job=1 AND op='up'`).Scan(&proof); err != nil {
+		t.Fatal(err)
+	}
+	if len(proof) != sha256.Size+1 || proof[0] != proofV3 || balances(t, r.Pool)[101] != rows {
+		t.Fatal("resume must write new evidence and update each row once")
+	}
+}
+
 func TestTamperedCheckpointIsNotTrusted(t *testing.T) {
 	r, exec := sealedRunner(t, "ev_tamper")
 	ctx := context.Background()
@@ -77,7 +118,42 @@ func TestTamperedCheckpointIsNotTrusted(t *testing.T) {
 	}
 }
 
-// Bukti yang di-seal dengan kunci lain (instance platform lain, atau kunci yang sudah diganti) tidak dipercaya.
+func TestManifestDigestDetectsTamperingAndKeepsV2Seals(t *testing.T) {
+	r, exec := sealedRunner(t, "ev_digest")
+	ctx := context.Background()
+	sp := batchSpec(7, OpUp, upSQL)
+	if _, err := r.Run(ctx, sp, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	v2, err := r.proof(ctx, r.Pool, sp, proofV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec(`UPDATE _platform.migration_seals SET proof=$1 WHERE root_job=7 AND op='up'`, v2)
+	if _, done, err := r.Evidence(ctx, sp); err != nil || !done {
+		t.Fatalf("seal v2 yang sah harus tetap diterima: %v, %v", done, err)
+	}
+
+	tamper := `DO $$ BEGIN EXECUTE 'UPDATE ' || quote_ident('_plat' || 'form') || '.migration_checkpoints SET row_manifest = row_manifest || ''{"x":1}'''; END $$;
+		UPDATE perf.accounts SET balance = 0`
+	if _, err := r.Run(ctx, Spec{RootID: 8, Op: OpUp, SQL: tamper}, nil); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("SQL migration yang mengubah manifest harus ditolak: %v", err)
+	}
+
+	exec(`UPDATE _platform.migration_checkpoints SET row_manifest = row_manifest || '{"x":1}' WHERE root_job=7 AND batch_no=3`)
+	if _, _, err := r.Evidence(ctx, sp); !errors.Is(err, ErrCommitUnknown) {
+		t.Fatalf("manifest yang diubah harus membatalkan seal v2: %v", err)
+	}
+	if err := r.seal(ctx, r.Pool, sp); err != nil {
+		t.Fatal(err)
+	}
+	exec(`UPDATE _platform.migration_checkpoints SET row_manifest = row_manifest || '{"y":1}' WHERE root_job=7 AND batch_no=5`)
+	if _, _, err := r.Evidence(ctx, sp); !errors.Is(err, ErrCommitUnknown) {
+		t.Fatalf("manifest yang diubah harus membatalkan seal v3: %v", err)
+	}
+}
+
 func TestEvidenceSealedWithAnotherKeyIsRejected(t *testing.T) {
 	r, _ := sealedRunner(t, "ev_key")
 	ctx := context.Background()
@@ -95,9 +171,6 @@ func TestEvidenceSealedWithAnotherKeyIsRejected(t *testing.T) {
 	}
 }
 
-// SQL migration tidak bisa menyebut _platform secara langsung (ditolak policy). Lewat SQL dinamis
-// namanya bisa disamarkan, tetapi perubahan metadata di dalam transaksi migration terdeteksi dan
-// seluruh transaksi dibatalkan, termasuk perubahan datanya.
 func TestMigrationSQLCannotTamperWithControlTables(t *testing.T) {
 	if err := sqlpolicy.Check(`DELETE FROM _platform.migration_seals`); err == nil {
 		t.Fatal("akses langsung ke _platform harus ditolak policy")
@@ -122,7 +195,6 @@ func TestMigrationSQLCannotTamperWithControlTables(t *testing.T) {
 		t.Fatalf("data migration yang menyerang metadata harus ikut dibatalkan: %v", b)
 	}
 
-	// Mode batch: fungsi yang dibuat sebelumnya lalu dipanggil dari UPDATE batch juga tertangkap.
 	exec(`CREATE FUNCTION perf.sneaky(v bigint) RETURNS bigint LANGUAGE plpgsql AS $$
 		BEGIN EXECUTE 'DELETE FROM ' || quote_ident('_plat' || 'form') || '.migration_seals'; RETURN v; END $$`)
 	sneaky := `UPDATE perf.accounts SET balance = perf.sneaky(balance) WHERE id > $1 AND id <= $2`
@@ -134,8 +206,6 @@ func TestMigrationSQLCannotTamperWithControlTables(t *testing.T) {
 	}
 }
 
-// Manifest mencatat versi baris (xmin/ctid). Baris yang diubah pihak lain setelah batch up tidak
-// boleh ditimpa oleh kompensasi; kompensasi berhenti tanpa mengubah apa pun.
 func TestCompensationRefusesRowsChangedAfterApply(t *testing.T) {
 	r, exec := sealedRunner(t, "ev_manifest")
 	ctx := context.Background()

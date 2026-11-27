@@ -9,8 +9,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// CreateDraftBatch persists all generated drafts atomically without running any
-// target SQL. Every draft still passes the ordinary dialect validation.
 func CreateDraftBatch(ctx context.Context, db *pgxpool.Pool, connID uuid.UUID, userID int64, name string, statements []string) ([]int64, error) {
 	if len(statements) == 0 || len(statements) > 250 {
 		return nil, ValidationError("Batch harus berisi 1 sampai 250 draft.")

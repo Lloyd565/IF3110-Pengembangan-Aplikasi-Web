@@ -1,4 +1,3 @@
-// hash-password reads a password from stdin and prints only its Argon2id hash.
 package main
 
 import (

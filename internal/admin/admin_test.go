@@ -24,7 +24,7 @@ type env struct {
 	svc   *Service
 	az    *authz.Authorizer
 	key   []byte
-	actor int64 // platform admin yang melakukan semua aksi
+	actor int64
 }
 
 func setup(t *testing.T, name string) *env {
@@ -187,7 +187,6 @@ func TestAccessFlow(t *testing.T) {
 	}
 	conn := e.newConn(t, "DB-A")
 
-	// password koneksi terenkripsi, bisa didekripsi dengan kunci + id yang benar
 	var enc []byte
 	e.db.QueryRow(ctx, `SELECT password_enc FROM db_connections WHERE id = $1`, conn).Scan(&enc)
 	if bytes.Contains(enc, []byte("s3cret-pass")) {
@@ -197,7 +196,6 @@ func TestAccessFlow(t *testing.T) {
 		t.Fatalf("dekripsi: %q, %v", pw, err)
 	}
 
-	// tanpa grant: ditolak, termasuk platform admin
 	if e.can(alice, conn, authz.SchemaView) {
 		t.Fatal("tanpa grant harus ditolak")
 	}
@@ -205,7 +203,6 @@ func TestAccessFlow(t *testing.T) {
 		t.Fatal("platform admin tanpa grant harus ditolak")
 	}
 
-	// masuk group yang belum punya grant: privilege tidak naik
 	if err := e.svc.AddMember(ctx, e.actor, gid, alice); err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +210,6 @@ func TestAccessFlow(t *testing.T) {
 		t.Error("group tanpa grant: tidak perlu rotasi")
 	}
 
-	// grant view: naik dari none -> rotasi, bisa baca, tidak bisa menulis
 	if err := e.svc.SetGrant(ctx, e.actor, gid, conn, "view"); err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +220,6 @@ func TestAccessFlow(t *testing.T) {
 		t.Error("view only: boleh baca, tidak boleh menulis")
 	}
 
-	// view -> view tidak merotasi; view -> edit merotasi; edit -> view tidak merotasi
 	e.clearRotate(t)
 	e.svc.SetGrant(ctx, e.actor, gid, conn, "view")
 	if e.forceRotate(t, alice) {
@@ -243,7 +238,6 @@ func TestAccessFlow(t *testing.T) {
 		t.Error("penurunan level berlaku langsung pada request berikutnya")
 	}
 
-	// anggota baru ke group yang sudah punya grant: rotasi; dikeluarkan: langsung ditolak
 	if err := e.svc.AddMember(ctx, e.actor, gid, bob); err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +262,6 @@ func TestAccessFlow(t *testing.T) {
 		t.Error("grant dicabut: harus ditolak")
 	}
 
-	// validasi input
 	if err := e.svc.SetGrant(ctx, e.actor, gid, conn, "admin"); !errors.Is(err, ErrInvalid) {
 		t.Errorf("level tidak valid: %v", err)
 	}
@@ -301,7 +294,6 @@ func TestConnections(t *testing.T) {
 		t.Errorf("nama koneksi kembar: %v", err)
 	}
 
-	// ubah tanpa password: password lama dipertahankan; dengan password: diganti
 	readPW := func() string {
 		var enc []byte
 		e.db.QueryRow(ctx, `SELECT password_enc FROM db_connections WHERE id = $1`, conn).Scan(&enc)
@@ -323,7 +315,6 @@ func TestConnections(t *testing.T) {
 		t.Error("password baru harus tersimpan terenkripsi")
 	}
 
-	// hapus = soft delete: hilang dari daftar; nama bisa dipakai lagi
 	if err := e.svc.DeleteConnection(ctx, e.actor, conn); err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +326,6 @@ func TestConnections(t *testing.T) {
 	}
 	e.newConn(t, "DB-A2")
 
-	// test connection ke port tertutup gagal
 	if err := e.svc.TestConnection(ctx, dbconn.Params{Host: "127.0.0.1", Port: 1, DBName: "d", Username: "u"}); err == nil {
 		t.Error("test connection ke port tertutup harus gagal")
 	}
@@ -343,7 +333,7 @@ func TestConnections(t *testing.T) {
 
 func TestEnsureAdmin(t *testing.T) {
 	ctx := context.Background()
-	e := setup(t, "admin_boot") // setup sudah membuat satu admin ("root")
+	e := setup(t, "admin_boot")
 
 	created, err := e.svc.Users.EnsureAdmin(ctx, "admin2", "h")
 	if err != nil || created {

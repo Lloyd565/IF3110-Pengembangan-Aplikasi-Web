@@ -11,9 +11,6 @@ func batchReq(action, sql, down string) request {
 	return x
 }
 
-// Mode batch hanya menerima forward yang bisa dikompensasi (UPDATE dengan manifest baris). DELETE dan
-// INSERT ... SELECT lolos validator batch, tetapi checkpoint-nya tanpa manifest sehingga kompensasi
-// selalu ditolak setelah migration terlanjur berjalan sebagian.
 func TestBatchModeAcceptsOnlyCompensableForwardSQL(t *testing.T) {
 	update := `UPDATE perf.accounts SET balance = balance + 1 WHERE id > $1 AND id <= $2`
 	undo := `UPDATE perf.accounts SET balance = balance - 1 WHERE id > $1 AND id <= $2`
@@ -27,7 +24,7 @@ func TestBatchModeAcceptsOnlyCompensableForwardSQL(t *testing.T) {
 		{"delete apply", "apply", `DELETE FROM perf.accounts WHERE id > $1 AND id <= $2`, "", false},
 		{"insert select apply", "apply", `INSERT INTO perf.archive SELECT * FROM perf.accounts WHERE id > $1 AND id <= $2`, "", false},
 		{"delete forward", "forward", `DELETE FROM perf.accounts WHERE id > $1 AND id <= $2`, "", false},
-		// Rollback batch menjalankan SQL down lewat kompensasi; DELETE di arah down tetap didukung.
+
 		{"rollback delete", "rollback", `DELETE FROM perf.accounts WHERE id > $1 AND id <= $2`, "", true},
 	}
 	for _, c := range cases {

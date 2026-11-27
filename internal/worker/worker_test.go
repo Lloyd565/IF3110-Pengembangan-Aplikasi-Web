@@ -44,7 +44,6 @@ type attempt struct {
 	Plan                   workflow.Plan
 }
 
-// fakeFlow menggantikan workflow milik Richard (approval dan history) pada test worker.
 type fakeFlow struct {
 	mu                  sync.Mutex
 	plan                workflow.Plan
@@ -63,7 +62,7 @@ func (f *fakeFlow) Prepare(ctx context.Context, rid string) (workflow.Plan, erro
 	return f.plan, nil
 }
 
-func (f *fakeFlow) PrepareRecovery(ctx context.Context, rid string) (workflow.Plan, error) {
+func (f *fakeFlow) PrepareRecovery(ctx context.Context, rid string, _ int64) (workflow.Plan, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.recovered++
@@ -179,7 +178,6 @@ func (e *env) enqueue(conn uuid.UUID, plan workflow.Plan, opts ...opt) int64 {
 	return id
 }
 
-// drain menjalankan job sampai queue kosong (retry langsung siap karena backoff 0).
 func (e *env) drain(w *Worker) int {
 	e.t.Helper()
 	n := 0
@@ -289,7 +287,7 @@ func TestBatchFailureMidwayBecomesPartialThenResumesOnRetry(t *testing.T) {
 	j := e.job(id)
 	eq(t, "status", j.Status, "success")
 	eq(t, "retry_count", j.RetryCount, 1)
-	// setiap attempt tercatat: yang gagal tetap terlihat sebagai partial, tidak ditimpa oleh yang sukses.
+
 	eq(t, "attempts", e.flow.statuses(), "[partial success]")
 	eq(t, "nomor attempt", fmt.Sprint(e.flow.attempts[0].No, e.flow.attempts[1].No), "1 2")
 	eq(t, "balance", balances(t, e.targets[connA]), "map[101:1000]")
@@ -319,10 +317,9 @@ func TestRetriesExhaustedLeavesPartialJobThatCanBeResumedOrCompensated(t *testin
 	}
 	eq(t, "attempts", e.flow.statuses(), "[partial partial]")
 
-	// resume: hanya batch yang belum committed; revalidasi memakai jalur pemulihan.
 	w.Hooks.BeforeCommit = nil
 	resume := e.enqueue(connA, batchPlan(upSQL), kind(jobs.KindResume, id))
-	e.flow.plan = e.flow.attempts[0].Plan // pengajuan semula yang sama
+	e.flow.plan = e.flow.attempts[0].Plan
 	e.drain(w)
 	r := e.job(resume)
 	if r.Status != "success" || r.RootID != id || e.flow.recovered < 1 {
@@ -336,7 +333,7 @@ func TestDuplicateDeliveryDoesNotDoubleCommit(t *testing.T) {
 	id := e.enqueue(connA, batchPlan(upSQL))
 	w := e.worker("w1")
 	e.drain(w)
-	// pesan job terkirim ulang setelah selesai.
+
 	if _, err := e.platform.Exec(context.Background(), `UPDATE jobs SET status = 'queued', worker_id = NULL, lease_until = NULL, finished_at = NULL WHERE id = $1`, id); err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +346,7 @@ func TestDuplicateDeliveryDoesNotDoubleCommit(t *testing.T) {
 func TestCrashedWorkerJobIsTakenOverWithoutRepeatingBatches(t *testing.T) {
 	e := newEnv(t, "w_crash")
 	id := e.enqueue(connA, batchPlan(upSQL))
-	// worker pertama mati setelah 3 batch committed dan attempt-nya masih terbuka.
+
 	dead := &batch.Runner{Pool: e.targets[connA]}
 	dead.Hooks.BeforeCommit = func(op string, n int) error {
 		if n == 4 {
@@ -403,11 +400,11 @@ func TestWorkerThatLosesLeaseStopsAndDoesNotWriteResults(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); w.RunOnce(context.Background()) }()
 	<-reached
-	// worker lain mengambil alih job selagi worker lama masih berjalan.
+
 	if _, err := e.platform.Exec(context.Background(), `UPDATE jobs SET worker_id = 'pengambil', lease_until = now() + interval '1 hour' WHERE id = $1`, id); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(900 * time.Millisecond) // heartbeat (lease/3) mendeteksi kehilangan kepemilikan
+	time.Sleep(900 * time.Millisecond)
 	close(proceed)
 	<-done
 	j := e.job(id)
@@ -500,7 +497,7 @@ func TestMultipleWorkersSerializePerDatabaseAndNeverDoubleCommit(t *testing.T) {
 	for _, conn := range []uuid.UUID{connA, connB} {
 		eq(t, "balance "+conn.String()[:4], balances(t, e.targets[conn]), "map[103:1000]")
 	}
-	// pada database yang sama, job berjalan bergantian: job berikut baru mulai setelah job sebelumnya selesai.
+
 	type span struct{ start, end time.Time }
 	for _, conn := range []uuid.UUID{connA, connB} {
 		rs, _ := e.platform.Query(context.Background(), `SELECT started_at, finished_at FROM jobs WHERE connection_id = $1 ORDER BY started_at`, conn)
@@ -534,7 +531,7 @@ func TestCommitUnknownHoldsUntilEvidenceThenResumeReconciles(t *testing.T) {
 			return nil
 		}
 		once.Do(func() {
-			// koneksi worker diputus dan target tidak bisa dikunci: hasil commit tidak bisa dipastikan.
+
 			target.Exec(context.Background(), `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
 				WHERE datname = current_database() AND pid <> pg_backend_pid() AND state = 'idle in transaction'`)
 			time.Sleep(150 * time.Millisecond)
@@ -554,7 +551,6 @@ func TestCommitUnknownHoldsUntilEvidenceThenResumeReconciles(t *testing.T) {
 	}
 	eq(t, "attempts", e.flow.statuses(), "[commit_unknown commit_unknown]")
 
-	// target kembali bisa dikunci: resume membaca bukti dulu, lalu melanjutkan tanpa double commit.
 	holder.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtext('if3110.migration'))`)
 	holder.Release()
 	w.Hooks.BeforeCommit = nil
@@ -604,7 +600,6 @@ func TestCompensationJobRevertsInReverseOrderAndResumesAfterPartialFailure(t *te
 		t.Fatalf("batch 8-10 sudah dikembalikan, sisanya belum: %v", b)
 	}
 
-	// lanjutkan kompensasi: tidak mengulang batch yang sudah dikembalikan.
 	order = nil
 	w.Hooks.BeforeCommit = func(op string, n int) error { order = append(order, n); return nil }
 	again := e.enqueue(connA, down, kind(jobs.KindCompensate, comp))
@@ -622,7 +617,6 @@ func TestTraceContinuesFromEnqueueThroughWorkerToLockAndBatch(t *testing.T) {
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 	e := newEnv(t, "w_trace")
 
-	// request API: span http.request, lalu trace context disimpan di job saat enqueue.
 	apiCtx, apiSpan := otel.Tracer("api").Start(context.Background(), "http.request")
 	stored := jobs.InjectTrace(apiCtx)
 	apiSpan.End()

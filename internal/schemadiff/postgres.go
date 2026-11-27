@@ -167,8 +167,7 @@ func readPostgres(ctx context.Context, target *dbconn.Target, schema string) (Sn
 				rows.Close()
 				return out, err
 			}
-			// PostgreSQL 18 catalogs NOT NULL separately; nullability is already
-			// captured on the column, which also works on PostgreSQL 16/17.
+
 			if kind == "n" {
 				if c.NotValid {
 					t.Manual = append(t.Manual, "NOT NULL NOT VALID "+c.Name)

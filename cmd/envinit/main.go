@@ -1,5 +1,3 @@
-// envinit membuat .env dari .env.example dan mengisi kunci rahasia + admin pertama secara acak.
-// Tidak menimpa .env yang sudah ada.
 package main
 
 import (
@@ -16,7 +14,6 @@ func random(n int) string {
 	return base64.StdEncoding.EncodeToString(b)
 }
 
-// fill mengisi variabel yang kosong di template; nilai yang sudah ada dibiarkan.
 func fill(example string, values map[string]string) string {
 	lines := strings.Split(example, "\n")
 	for i, line := range lines {

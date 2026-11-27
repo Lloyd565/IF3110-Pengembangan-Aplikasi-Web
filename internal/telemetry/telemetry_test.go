@@ -94,7 +94,7 @@ func TestPgxTracerLogsEverySQLWithRedaction(t *testing.T) {
 	sr := tracetest.NewSpanRecorder()
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr)))
 	buf := capture(t)
-	ctx := With(context.Background(), Info{Actor: "7", Database: "db-1", CorrelationID: "corr-1", JobID: 42, Attempt: 2, Batch: 3})
+	ctx := With(context.Background(), Info{Actor: "7", Database: "db-1", CorrelationID: "corr-1", RevisionID: "revision-1", JobID: 42, Attempt: 2, Batch: 3})
 
 	var s string
 	if err := pool.QueryRow(ctx, `SELECT $1::text, 'literal-rahasia'`, "param-rahasia").Scan(&s, new(string)); err != nil {
@@ -118,7 +118,8 @@ func TestPgxTracerLogsEverySQLWithRedaction(t *testing.T) {
 	recs := records(t, buf)
 	start := find(recs, "sql.start", func(m map[string]any) bool { return strings.Contains(m["query"].(string), "SELECT $1") })
 	if start == nil || start["status"] != "started" || start["job_id"].(float64) != 42 || start["correlation_id"] != "corr-1" ||
-		start["actor"] != "7" || start["database"] != "db-1" || start["attempt"].(float64) != 2 || start["batch"].(float64) != 3 {
+		start["actor"] != "7" || start["database"] != "db-1" || start["revision_id"] != "revision-1" ||
+		start["attempt"].(float64) != 2 || start["batch"].(float64) != 3 {
 		t.Fatalf("event mulai tidak lengkap: %v", start)
 	}
 	if p := start["params"].([]any); len(p) != 1 || p[0] != "[redacted]" {
@@ -295,7 +296,7 @@ func TestMetricsExposeQueueAndJobCounts(t *testing.T) {
 			t.Errorf("%s = %v (ada=%v), mau %v", key, got, ok, want)
 		}
 	}
-	// label dibatasi: job ID, user ID, dan SQL tidak boleh menjadi label.
+
 	for key := range byName {
 		if strings.Contains(key, "job_id") || strings.Contains(key, "user") || strings.Contains(key, "sql") {
 			t.Errorf("label berkardinalitas tinggi: %s", key)

@@ -56,7 +56,7 @@ type SessionStore interface {
 
 type Resolution struct {
 	Session Session
-	// Token is set only when a new cookie must be sent.
+
 	Token string
 }
 
@@ -117,7 +117,7 @@ func (m *Manager) Resolve(ctx context.Context, token string) (Resolution, error)
 			if expired {
 				return Resolution{}, ErrInvalidSession
 			}
-			// A concurrent request may have refreshed last_seen after Find.
+
 			continue
 		}
 		current := subtle.ConstantTimeCompare(hash[:], s.TokenHash[:]) == 1
@@ -137,7 +137,7 @@ func (m *Manager) Resolve(ctx context.Context, token string) (Resolution, error)
 			next.TokenHash = TokenHash(replacement)
 			next.RotatedAt, next.ForceRotate = now, false
 		} else if !current {
-			// CAS losers and clients that missed Set-Cookie recover the winning value.
+
 			candidate := rotatedToken(m.key, token, s.ID, s.RotatedAt)
 			candidateHash := TokenHash(candidate)
 			if subtle.ConstantTimeCompare(candidateHash[:], s.TokenHash[:]) == 1 {

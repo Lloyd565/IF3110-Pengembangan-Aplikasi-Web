@@ -36,7 +36,6 @@ func batchSpec(root int64, op, sql string) Spec {
 	return Spec{RootID: root, Op: op, SQL: sql, Size: 100, Table: "perf.accounts", Column: "id"}
 }
 
-// balances mengembalikan jumlah row per nilai balance, untuk memeriksa tidak ada row yang berubah dua kali.
 func balances(t *testing.T, db *pgxpool.Pool) map[int64]int {
 	t.Helper()
 	out := map[int64]int{}
@@ -72,7 +71,7 @@ func TestNormalModeAndDuplicateDelivery(t *testing.T) {
 	if err != nil || p.Rows != rows || p.Batches != 1 {
 		t.Fatalf("run: %+v err=%v", p, err)
 	}
-	// pesan terkirim dua kali: tidak boleh double commit.
+
 	p, err = r.Run(ctx, sp, nil)
 	if err != nil || p.Rows != rows {
 		t.Fatalf("run ulang: %+v err=%v", p, err)
@@ -120,7 +119,7 @@ func TestBatchCommitsEveryBatchSeparately(t *testing.T) {
 	if n := checkpoints(t, db, 1, OpUp); n != 10 {
 		t.Errorf("checkpoint = %d, mau 10", n)
 	}
-	// delivery ganda setelah selesai.
+
 	if p, err := r.Run(context.Background(), batchSpec(1, OpUp, upSQL), nil); err != nil || p.Batches != 10 {
 		t.Fatalf("run ulang: %+v err=%v", p, err)
 	}
@@ -148,7 +147,7 @@ func TestBatchFailureBeforeCommitKeepsPreviousBatchesAndResumes(t *testing.T) {
 	if n := checkpoints(t, db, 1, OpUp); n != 3 {
 		t.Fatalf("checkpoint tidak boleh tertinggal atau mendahului data: %d", n)
 	}
-	// resume: hanya batch yang belum committed yang diproses.
+
 	r.Hooks.BeforeCommit = nil
 	var seen []int
 	r.Hooks.AfterCommit = func(op string, n int) error { seen = append(seen, n); return nil }
@@ -199,7 +198,7 @@ func TestBatchScopeFixedAtStart(t *testing.T) {
 		return nil
 	}
 	r.Run(context.Background(), batchSpec(1, OpUp, upSQL), nil)
-	// row baru masuk setelah cakupan ditetapkan.
+
 	if _, err := db.Exec(context.Background(), `INSERT INTO perf.accounts SELECT g, 100 FROM generate_series(2001, 2050) g`); err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +264,7 @@ func TestReconcileUsesEvidence(t *testing.T) {
 	if err := r.reconcile(context.Background(), batchSpec(1, OpUp, upSQL), 99, cause); !errors.Is(err, ErrRolledBack) {
 		t.Errorf("tidak ada checkpoint: harus ErrRolledBack, dapat %v", err)
 	}
-	// target tidak bisa dibaca: hasil commit belum pasti, jangan menebak.
+
 	dead := newTarget(t, "batch_reconcile_dead")
 	dead.Close()
 	if err := (&Runner{Pool: dead}).reconcile(context.Background(), batchSpec(1, OpUp, upSQL), 1, cause); !errors.Is(err, ErrCommitUnknown) {
@@ -275,7 +274,7 @@ func TestReconcileUsesEvidence(t *testing.T) {
 
 func TestLockSerializesSameDatabaseAcrossRunnersAndAliases(t *testing.T) {
 	db := newTarget(t, "batch_lock")
-	alias, err := pgxpool.NewWithConfig(context.Background(), db.Config()) // konfigurasi koneksi kedua ke database fisik yang sama
+	alias, err := pgxpool.NewWithConfig(context.Background(), db.Config())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +285,7 @@ func TestLockSerializesSameDatabaseAcrossRunnersAndAliases(t *testing.T) {
 	first.Hooks.BeforeCommit = func(op string, n int) error {
 		if n == 2 {
 			close(started)
-			<-release // tahan lock di antara commit batch
+			<-release
 		}
 		return nil
 	}
@@ -341,7 +340,7 @@ func TestCompensateReverseOrderAndResume(t *testing.T) {
 	if _, err := r.Run(context.Background(), batchSpec(1, OpUp, upSQL), nil); err != nil {
 		t.Fatal(err)
 	}
-	// gagal di tengah kompensasi: sebagian dikembalikan.
+
 	var order []int
 	r.Hooks.BeforeCommit = func(op string, n int) error {
 		if op == OpDown {
@@ -362,7 +361,7 @@ func TestCompensateReverseOrderAndResume(t *testing.T) {
 	if b := balances(t, db); b[100] != 300 || b[101] != 700 {
 		t.Fatalf("batch 8-10 sudah dikembalikan, sisanya belum: %v", b)
 	}
-	// lanjutkan: partially_reverted bisa diteruskan tanpa mengulang batch yang sudah dikembalikan.
+
 	order = nil
 	r.Hooks.BeforeCommit = func(op string, n int) error { order = append(order, n); return nil }
 	p, err = r.Compensate(context.Background(), Spec{RootID: 1, SQL: downSQL}, nil)
@@ -375,7 +374,7 @@ func TestCompensateReverseOrderAndResume(t *testing.T) {
 	if b := balances(t, db); len(b) != 1 || b[100] != rows {
 		t.Fatalf("seluruh row harus kembali tepat sekali: %v", b)
 	}
-	// kompensasi ulang tidak mengubah apa pun.
+
 	if _, err := r.Compensate(context.Background(), Spec{RootID: 1, SQL: downSQL}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -419,9 +418,9 @@ func TestBatchRunWithoutScopeIsRejectedInsteadOfPanicking(t *testing.T) {
 	db := newTarget(t, "batch_noscope")
 	r := &Runner{Pool: db}
 	if _, err := r.Run(context.Background(), Spec{RootID: 1, Op: OpUp, SQL: `UPDATE perf.accounts SET balance = balance + 1`}, nil); err != nil {
-		t.Fatal(err) // membuat tabel kontrol
+		t.Fatal(err)
 	}
-	// run yang belum selesai dan tidak punya cakupan (bukan buatan mode batch).
+
 	if _, err := db.Exec(context.Background(), `INSERT INTO _platform.migration_runs (root_job, op, total_rows) VALUES (9, 'up', 5)`); err != nil {
 		t.Fatal(err)
 	}

@@ -238,7 +238,7 @@ func (s *staleSnapshotStore) Find(ctx context.Context, hash [32]byte) (Session, 
 func TestSessionStaleExpiryDoesNotRevokeLiveSession(t *testing.T) {
 	m, store, now, issued := sessionFixture(t)
 	*now = now.Add(30 * time.Minute)
-	// A concurrent request refreshed last_seen after this request read its snapshot.
+
 	store.session.LastSeenAt = *now
 	m.store = &staleSnapshotStore{fakeStore: store, snapshot: &issued.Session}
 	if _, err := m.Resolve(context.Background(), issued.Token); err != nil {

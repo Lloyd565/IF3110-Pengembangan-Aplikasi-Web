@@ -339,7 +339,7 @@ func targetRunner(target *dbconn.Target) runner {
 const mariaHistory = "_platform_migrations"
 
 func ensureMariaHistory(ctx context.Context, conn *sql.Conn) error {
-	// Cek dulu: CREATE TABLE IF NOT EXISTS tetap butuh hak CREATE walau tabel sudah ada.
+
 	var n int
 	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?`, mariaHistory).Scan(&n); err != nil || n > 0 {
 		return err
@@ -352,7 +352,7 @@ func ensureMariaHistory(ctx context.Context, conn *sql.Conn) error {
 
 func appliedMaria(ctx context.Context, target *dbconn.Target, id int64, source string) (bool, error) {
 	var ok bool
-	// withMaria mengambil lock yang sama dengan migration, jadi menunggu migration yang masih jalan.
+
 	err := withMaria(ctx, target, func(ctx context.Context, conn *sql.Conn) error {
 		var n int
 		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?`, mariaHistory).Scan(&n); err != nil || n == 0 {
@@ -361,7 +361,7 @@ func appliedMaria(ctx context.Context, target *dbconn.Target, id int64, source s
 		return conn.QueryRowContext(ctx, `SELECT COUNT(*) > 0 FROM `+mariaHistory+` WHERE migration_id=?`, id).Scan(&ok)
 	})
 	if err == nil && !ok {
-		// DDL MariaDB commit sendiri sebelum riwayat ditulis: tanpa riwayat, hasilnya tidak pasti.
+
 		if _, ddl, _ := mariaSQL(source); ddl {
 			return false, errManualCheck
 		}
@@ -429,7 +429,7 @@ func runMaria(ctx context.Context, target *dbconn.Target, id int64, source strin
 			if _, err := conn.ExecContext(ctx, stmts[0].SQL); err != nil {
 				return err
 			}
-			// DDL sudah ter-commit; gagal mencatat riwayat tidak membatalkannya.
+
 			if _, err := conn.ExecContext(ctx, record, id); err != nil {
 				log.Printf("migration %d: DDL berhasil tetapi riwayat MariaDB gagal dicatat: %s", id, telemetry.RedactError(err))
 			}

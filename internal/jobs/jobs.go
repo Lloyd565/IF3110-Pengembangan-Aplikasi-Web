@@ -1,6 +1,3 @@
-// Package jobs: queue persisten di Platform DB. Satu baris = satu pekerjaan worker.
-// Worker mengklaim dengan lease; semua perubahan status dipagari worker_id supaya
-// worker lama tidak bisa melanjutkan setelah kepemilikan berpindah.
 package jobs
 
 import (
@@ -36,10 +33,8 @@ const (
 	KindCompensate = "compensate"
 )
 
-// ErrLeaseLost: worker ini sudah tidak memiliki job (lease habis dan diklaim worker lain).
 var ErrLeaseLost = errors.New("jobs: kepemilikan job hilang")
 
-// Querier dipenuhi *pgxpool.Pool dan pgx.Tx, supaya Enqueue bisa ikut transaksi platform.
 type Querier interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
@@ -72,7 +67,7 @@ type Job struct {
 	WorkerID         string
 	ExecutionID      string
 	DispatchReady    bool
-	AttemptOpen      bool // attempt history sudah dibuka tetapi hasilnya belum dicatat
+	AttemptOpen      bool
 	CommittedBatches int64
 	CommittedRows    int64
 	TotalRows        *int64
@@ -82,13 +77,10 @@ type Job struct {
 	UpdatedAt        time.Time
 }
 
-// Terminal berarti worker tidak akan menyentuh job ini lagi.
 func (j *Job) Terminal() bool {
 	return j.Status == StatusSucceeded || j.Status == StatusFailed || j.Status == StatusCancelled
 }
 
-// PublicStatus: nama status untuk API/SPA. Job gagal yang meninggalkan perubahan committed
-// dilaporkan sebagai hold-nya (partial, partially_reverted, commit_unknown); retry_wait tampil queued.
 func (j *Job) PublicStatus() string {
 	return contracts.PublicJobStatus(j.Status, j.Hold)
 }
@@ -105,7 +97,6 @@ func scan(row pgx.Row) (*Job, error) {
 	return &j, err
 }
 
-// Enqueue idempoten: kunci yang sama mengembalikan job lama (created=false), tidak membuat yang kedua.
 func Enqueue(ctx context.Context, q Querier, in NewJob) (id int64, created bool, err error) {
 	if in.Kind == "" {
 		in.Kind = KindRun
@@ -157,11 +148,8 @@ func List(ctx context.Context, q Querier, connID uuid.UUID, limit int) ([]*Job, 
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (*Job, error) { return scan(r) })
 }
 
-// Claim mengambil satu job siap jalan: queued, retry_wait yang sudah waktunya, atau running dengan
-// lease kedaluwarsa (worker sebelumnya mati). Job pada database yang sedang dikerjakan job lain
-// dilewati. Mengembalikan nil jika tidak ada pekerjaan.
 func Claim(ctx context.Context, db *pgxpool.Pool, workerID string, lease time.Duration) (*Job, error) {
-	ctx = telemetry.Quiet(ctx) // polling tiap detik: dicatat di level Debug, bukan Info
+	ctx = telemetry.Quiet(ctx)
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -172,9 +160,7 @@ func Claim(ctx context.Context, db *pgxpool.Pool, workerID string, lease time.Du
 	var conn uuid.UUID
 	var previous, target string
 	var recovering bool
-	// Job yang sedang memulihkan attempt-nya (attempt_open/commit_unknown) menahan semua job lain yang
-	// belum berjalan di target yang sama, termasuk yang retry_wait. Antar sesama job pemulihan, id
-	// terkecil jalan lebih dulu, jadi tidak ada yang saling menunggu.
+
 	err = tx.QueryRow(ctx, `
 		SELECT id,connection_id,status,coalesce(nullif(plan->>'TargetServer',''),connection_id::text),(attempt_open OR hold='commit_unknown') FROM jobs j
 		WHERE (status = 'queued'
@@ -191,8 +177,7 @@ func Claim(ctx context.Context, db *pgxpool.Pool, workerID string, lease time.Du
 	if err != nil {
 		return nil, err
 	}
-	// SKIP LOCKED hanya menjaga baris job. Serialisasi per database dijaga di sini: dua worker
-	// yang mengklaim job berbeda pada database yang sama bergantian lewat advisory lock ini.
+
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('jobs.claim:' || $1::text))`, target); err != nil {
 		return nil, err
 	}
@@ -229,27 +214,29 @@ func fenced(ctx context.Context, q Querier, sql string, id int64, worker string,
 
 const mine = ` WHERE id = $1 AND worker_id = $2 AND status = 'running' AND lease_until > clock_timestamp()`
 
-// Heartbeat memperpanjang lease. ErrLeaseLost berarti job sudah diambil worker lain.
 func Heartbeat(ctx context.Context, q Querier, id int64, worker string, lease time.Duration) error {
 	ctx = telemetry.Quiet(ctx)
 	return fenced(ctx, q, `UPDATE jobs SET lease_until = now() + $3::interval, updated_at = now()`+mine, id, worker, lease.String())
 }
 
-// SetExecution mencatat attempt aktif (execution history milik workflow).
 func SetExecution(ctx context.Context, q Querier, id int64, worker, executionID string, attempt int) error {
 	return fenced(ctx, q, `UPDATE jobs SET execution_id = $3::uuid, attempt = $4, attempt_open = true, dispatch_ready=false, updated_at = now()`+mine, id, worker, executionID, attempt)
 }
 
-// CloseAttempt menandai hasil attempt aktif sudah tercatat di history.
 func MarkDispatched(ctx context.Context, q Querier, id int64, worker string) error {
 	return fenced(ctx, q, `UPDATE jobs SET dispatch_ready=true,updated_at=now()`+mine, id, worker)
+}
+
+func RecordExecutionSQL(ctx context.Context, q Querier, id int64, worker, executionID, sql string) error {
+	return fenced(ctx, q, `UPDATE migration_executions e SET executed_sql = $4
+		FROM (SELECT execution_id FROM jobs`+mine+` AND attempt_open AND dispatch_ready FOR UPDATE) active
+		WHERE e.id = active.execution_id AND e.id = $3::uuid AND e.executed_sql IS NULL`, id, worker, executionID, sql)
 }
 
 func CloseAttempt(ctx context.Context, q Querier, id int64, worker string) error {
 	return fenced(ctx, q, `UPDATE jobs SET attempt_open = false, updated_at = now()`+mine, id, worker)
 }
 
-// SetProgress menyinkronkan ringkasan progres dari bukti di target (idempoten: nilai absolut).
 func SetProgress(ctx context.Context, q Querier, id int64, worker string, batches, rows int64, total *int64, hold string) error {
 	return fenced(ctx, q, `UPDATE jobs SET committed_batches = $3, committed_rows = $4, total_rows = $5, hold = $6,
 		updated_at = now()`+mine, id, worker, batches, rows, total, hold)
@@ -260,14 +247,11 @@ func Succeed(ctx context.Context, q Querier, id int64, worker string) error {
 		error_message = NULL, attempt_open = false, updated_at = now()`+mine, id, worker)
 }
 
-// Fail mengakhiri job. hold menjelaskan keadaan database (partial, commit_unknown, ...).
 func Fail(ctx context.Context, q Querier, id int64, worker, hold, msg string) error {
 	return fenced(ctx, q, `UPDATE jobs SET status = 'failed', hold = $3, error_message = $4, finished_at = now(),
 		lease_until = NULL, attempt_open = false, updated_at = now()`+mine, id, worker, hold, msg)
 }
 
-// Retry menjadwalkan ulang setelah jeda. Mengembalikan false jika jatah retry habis
-// (job sudah ditandai failed dengan hold yang diberikan).
 func Retry(ctx context.Context, q Querier, j *Job, worker, hold, msg string, backoff time.Duration) (bool, error) {
 	return retry(ctx, q, j, worker, hold, msg, backoff, false)
 }
