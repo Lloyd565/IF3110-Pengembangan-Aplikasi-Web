@@ -182,7 +182,16 @@ func (s *Service) Get(ctx context.Context, _ reqctx.Principal, connID uuid.UUID,
 	if err != nil {
 		return contracts.Migration{}, err
 	}
-	return scanMigration(s.DB.QueryRow(ctx, selectMigration+` WHERE m.connection_id = $1 AND m.id = $2`, connID, id))
+	m, err := scanMigration(s.DB.QueryRow(ctx, selectMigration+` WHERE m.connection_id = $1 AND m.id = $2`, connID, id))
+	if err != nil {
+		return m, err
+	}
+	pos, err := loadPosition(ctx, s.DB, connID)
+	if err != nil {
+		return m, err
+	}
+	m.ApplyBlockReason = pos.applyBlockReason(id)
+	return m, nil
 }
 
 func (s *Service) Save(ctx context.Context, p reqctx.Principal, connID uuid.UUID, mid string, d contracts.Draft) (contracts.Migration, error) {
@@ -443,6 +452,7 @@ func approvals(ctx context.Context, q querier, x request) ([]contracts.Approval,
 		LEFT JOIN group_leaders gl ON gl.group_id = g.id
 		LEFT JOIN users u ON u.id = gl.user_id AND u.is_active
 		LEFT JOIN migration_approvals a ON a.request_id = $2 AND a.group_id = g.id AND a.leader_id = u.id
+			AND a.decided_at >= gl.updated_at
 		WHERE dg.connection_id = $1
 		ORDER BY g.name`, x.connID, x.ID)
 	if err != nil {
@@ -509,14 +519,34 @@ func validation(x request, pos position) []string {
 	return out
 }
 
+func jobReviewOpen(status string) bool {
+	switch status {
+	case "queued", "running", "partial", "partially_reverted", "commit_unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+func (x request) reviewOpen() bool {
+	if x.stored == "pending_review" {
+		return x.Status != "stale"
+	}
+	return x.stored == "queued" && x.Job != nil && jobReviewOpen(x.Job.Status)
+}
+
 func (s *Service) flags(ctx context.Context, q querier, p reqctx.Principal, x *request) {
 	edit := authz.CanUsing(ctx, q, p, x.connID, authz.MigrationExecute) == nil
 	valid := len(x.Validation) == 0
 	x.CanSubmit = x.Status == "draft" && edit && valid
 	x.CanEnqueue = x.Status == "approved" && edit && valid
+	if !x.reviewOpen() {
+		return
+	}
 	for _, a := range x.Approvals {
-		if a.LeaderID == p.UserID && (x.Status == "pending_review" || x.Status == "approved" || x.Status == "rejected" || x.Status == "queued") {
+		if a.LeaderID == p.UserID {
 			x.CanApprove = true
+			return
 		}
 	}
 }
@@ -623,7 +653,15 @@ func (s *Service) ProposeUsing(ctx context.Context, tx pgx.Tx, p reqctx.Principa
 		if !ok {
 			return migration.ErrNotFound
 		}
-		if in.Action != "apply" {
+		if in.Action == "apply" {
+			pos, err := loadPosition(ctx, tx, connID)
+			if err != nil {
+				return err
+			}
+			if msg := pos.applyBlockReason(mid); msg != "" {
+				return conflict(msg)
+			}
+		} else {
 			t, err := parseUUID(in.TargetExecutionID)
 			if err != nil {
 				return migration.ValidationError("Rollback/forward memerlukan execution target.")
@@ -724,7 +762,7 @@ func (s *Service) Review(ctx context.Context, p reqctx.Principal, connID uuid.UU
 		if err != nil {
 			return err
 		}
-		if (x.stored != "pending_review" && x.stored != "queued") || x.Status == "stale" {
+		if !x.reviewOpen() {
 			return conflict("Pengajuan tidak sedang menunggu review.")
 		}
 		if f.Decision != "approve" && f.Decision != "reject" || utf8.RuneCountInString(f.Comment) > 4000 {
@@ -742,6 +780,17 @@ func (s *Service) Review(ctx context.Context, p reqctx.Principal, connID uuid.UU
 			}
 			if err := s.validateTarget(ctx, tx, connID, &x, true); err != nil {
 				return err
+			}
+		}
+		if x.stored == "queued" {
+			var status, hold string
+			err := tx.QueryRow(ctx, `SELECT status, hold FROM jobs
+				WHERE request_id = $1 AND connection_id = $2 ORDER BY id DESC LIMIT 1 FOR UPDATE`, x.ID, connID).Scan(&status, &hold)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if err != nil || !jobReviewOpen(contracts.PublicJobStatus(status, hold)) {
+				return conflict("Pengajuan tidak sedang menunggu review.")
 			}
 		}
 		led := 0

@@ -42,7 +42,8 @@ func (l *Leaders) Set(ctx context.Context, p reqctx.Principal, groupID, userID i
 	}
 	_, err = l.DB.Exec(ctx, `
 		INSERT INTO group_leaders (group_id, user_id) VALUES ($1, $2)
-		ON CONFLICT (group_id) DO UPDATE SET user_id = EXCLUDED.user_id, updated_at = now()`, groupID, userID)
+		ON CONFLICT (group_id) DO UPDATE SET user_id = EXCLUDED.user_id, updated_at = now()
+		WHERE group_leaders.user_id <> EXCLUDED.user_id`, groupID, userID)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
 		return &contracts.Error{Status: 422, Code: "validation", Message: "Leader harus anggota group tersebut."}

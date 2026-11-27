@@ -15,8 +15,6 @@ Runggu Data adalah platform pengelolaan database untuk Tugas Besar IF3110 Pengem
 | Migration M2 | SPA menyediakan editor up/down, alasan irreversible, review, history, progress job, dan pengajuan rollback, forward, atau pemulihan. Adapter API memanggil layanan workflow dan worker melalui kontrak Go. |
 | Observability dan keamanan | OpenTelemetry mengirim log dan trace. Prometheus mengambil metrik HTTP dan pool koneksi. Grafana memuat dashboard secara otomatis. CodeQL memindai Go dan JavaScript/TypeScript. |
 
-Server memasang layanan workflow, leader group, dan job pada startup. Proses worker terpisah menjalankan migration PostgreSQL dan MariaDB dari queue persisten. Rincian layanan ada di [Integrasi Migration M2](#integrasi-migration-m2).
-
 ## Menjalankan Aplikasi
 
 Lingkungan development menggunakan Go 1.26.11 atau lebih baru, Node.js 24+, npm, dan Docker Compose v2. Direktori kerja perintah berikut adalah root repository.
@@ -93,62 +91,28 @@ Tabel mengikuti konfigurasi development di [docker-compose.yml](docker-compose.y
 
 Durasi menggunakan format Go, misalnya `30m` atau `8h`. Konfigurasi harus memenuhi `0 < grace < rotation < absolute` dan `0 < idle <= absolute`.
 
-Di development, `SESSION_KEY` kosong menghasilkan key sementara saat startup. Menetapkan key yang stabil menjaga validitas CSRF pre-session dan pemulihan cookie rotasi antar-restart. `ENCRYPTION_KEY` kosong masih memungkinkan login, tetapi koneksi target tidak dapat dibuat atau dibuka. Key enkripsi yang tetap memungkinkan dekripsi password koneksi yang tersimpan.
-
-Konfigurasi production memakai reverse proxy HTTPS, `APP_ENV=production`, origin HTTPS publik, serta key yang sama pada seluruh instance aplikasi. Mode ini membaca konfigurasi dari environment proses. `.env.example` memuat contoh konfigurasi, sedangkan `.env` memuat kredensial development dan tercantum pada `.gitignore`.
-
 ## Alur Penggunaan
 
-Akun Platform Admin mengelola pengguna, group, keanggotaan, koneksi, dan grant melalui menu administrasi. Koneksi PostgreSQL development memakai host `localhost`, port `5434`, database/user/password `target`, dan SSL `disable`. Seed pada [scripts/target-seed.sql](scripts/target-seed.sql) dimuat ketika volume Target DB pertama kali dibuat.
+1. Platform Admin membuat pengguna, group, leader group, koneksi, dan grant. Koneksi PostgreSQL development: host `localhost`, port `5434`, database/user/password `target`, SSL `disable`.
+2. Anggota dengan grant View melihat schema, data, history, dan job. Grant Edit dapat membuat draft dan pengajuan.
+3. Draft berisi SQL up serta SQL down, atau ditandai irreversible beserta alasannya. SQL yang pernah dieksekusi tidak bisa diubah.
+4. Pengajuan (apply, rollback, atau forward) dikirim untuk review dan harus disetujui leader setiap group yang memiliki akses ke database, baik View maupun Edit.
+5. Pengajuan yang disetujui dimasukkan ke queue. API mengembalikan job ID, lalu progres dipantau di halaman Job.
+6. Worker memeriksa ulang izin dan approval, mengambil lock database, menjalankan SQL, lalu mencatat setiap attempt (berhasil maupun gagal) di migration history.
 
-Anggota group dengan grant View melihat database pada dashboard dan membuka schema, data, history, serta preview schema diff. Grant Edit menyediakan pembuatan draft dan pengajuan migration. Workspace memuat tab Schema, Migration, Review & approval, History, Job, dan Schema diff.
-
-Draft migration memuat SQL up serta SQL down atau alasan irreversible. Pengajuan mengacu pada revisi tertentu dan memerlukan approval leader group sesuai akses database. Perubahan revisi memerlukan review terhadap revisi yang digunakan. Enqueue menghasilkan job ID untuk pemantauan status, attempt, baris, batch yang telah commit, dan error. Review & approval menampilkan status pengajuan dan status job terbaru secara terpisah serta menyediakan tautan ke detail job.
-
-Worker memeriksa ulang izin dan approval, mengambil job dari queue persisten, dan menjalankan SQL di luar request HTTP. Pengajuan terikat pada konfigurasi koneksi dan identitas server/database target. Perubahan host, database, kredensial, TLS, atau DBMS membuat approval lama tidak berlaku untuk eksekusi. Pergantian kredensial tidak mengubah identitas target untuk pembacaan bukti pemulihan. Worker memprioritaskan pemulihan lease yang kedaluwarsa dan memakai backoff dengan batas percobaan saat bukti belum dapat dibaca. Pengajuan yang telah masuk queue tetap menerima perubahan keputusan leader; penolakan berlaku sebelum transaksi batch berikutnya. Job pada database yang sama memakai lock eksekusi, sedangkan database berbeda dapat diproses oleh worker berbeda. Rollback menggunakan SQL down dari revisi terkait. Forward dan pemulihan partial batch mengikuti pengajuan serta approval. History attempt dan status job tersimpan dalam satu transaksi metadata. Setiap klaim memiliki token kepemilikan dan lease; worker pengganti memeriksa identitas target dan autentikasi bukti sebelum melanjutkan pekerjaan. Bukti yang tidak tersedia atau tidak sah mempertahankan keadaan yang perlu direkonsiliasi. Draft lama memperoleh identitas target ketika dikirim untuk review. Pengajuan lama yang sudah ditinjau memerlukan pengajuan baru. History lama tetap tersedia.
-
-Platform Admin tetap memerlukan keanggotaan group dan grant untuk membuka database. Akun admin yang menggunakan explorer atau migration menjadi anggota group dengan grant yang sesuai.
-
-Cursor batch PostgreSQL memakai kolom integer `NOT NULL` dengan primary key atau unique index satu kolom yang valid dan tidak parsial. Tabel dengan inheritance, partisi, atau trigger pengguna tidak memenuhi prasyarat cursor batch. SQL menyertakan batas `cursor > $1 AND cursor <= $2` dan tidak mengubah cursor. Nilai minimum bigint ditolak karena tidak mempunyai batas bawah eksklusif yang dapat direpresentasikan oleh bigint.
-
-Cakupan batch mengikuti high-water mark yang tersimpan saat mulai, dengan ukuran 1 sampai 100000 baris. Setiap transaksi batch mengambil lock tulis pada tabel terkait selama pemilihan rentang dan eksekusi. Insert dengan cursor di atas high-water mark tidak ikut diproses; insert pada rentang yang belum dilewati dapat ikut diproses. Baris yang telah dihapus tidak diproses. Nilai total awal merupakan jumlah baris saat cakupan dibuat, sehingga dapat berbeda dari jumlah akhir ketika ada perubahan eksternal. Perubahan cursor oleh transaksi eksternal tidak memenuhi asumsi cursor stabil; cakupan ini memakai keanggotaan baris yang tersedia saat setiap batch dimulai. Batch UPDATE mencatat versi baris yang berhasil diubah dalam transaksi yang sama dengan checkpoint. Rollback hanya menjalankan SQL down pada baris yang versinya masih cocok. Baris baru di rentang lama tidak ikut berubah. Perubahan versi, penghapusan, atau checkpoint lama tanpa daftar baris memerlukan rekonsiliasi. Mode batch untuk apply dan forward hanya menerima UPDATE, karena hanya baris UPDATE yang tercatat sehingga dapat dikompensasi. DELETE dan INSERT ditolak saat pengajuan. SQL down pada rollback batch boleh berupa UPDATE atau DELETE.
+**Mode batch (PostgreSQL).** Cursor berupa kolom integer `NOT NULL` dan unik. SQL memakai batas `cursor > $1 AND cursor <= $2` dan hanya boleh berupa `UPDATE`, karena hanya baris UPDATE yang tercatat sehingga dapat dikompensasi. Cakupan ditetapkan saat mulai. Setiap batch adalah transaksi sendiri dengan checkpoint di database target. Batch yang gagal hanya membatalkan transaksinya sendiri, sehingga job berstatus `partial`. Job partial dapat dilanjutkan (resume) dari checkpoint atau dikompensasi dengan SQL down dalam urutan batch terbalik. Kompensasi yang gagal di tengah berstatus `partially_reverted` dan dapat dilanjutkan. Selama ada job yang `partial`, `partially_reverted`, atau `commit_unknown`, migration lain pada database tersebut ditahan.
 
 ### Target MariaDB (bonus DBMS tambahan)
 
-Koneksi database MariaDB development memakai host `localhost`, port `3307`, database `target`, username/password `target`, dan SSL `disable` pada target Compose lokal. Pada explorer MariaDB, database koneksi ditampilkan sebagai schema. Grant View/Edit dan pemeriksaan backend berlaku sama seperti PostgreSQL. Akun target memakai hak yang dibatasi pada database koneksi.
-
-SSL MariaDB mendukung `disable`, `require` (enkripsi tanpa verifikasi sertifikat), dan `verify-full` (verifikasi sertifikat serta hostname). MariaDB sebelum 10.6.1 dan DBMS yang tidak didukung ditolak saat test/open connection. Koneksi PostgreSQL yang sudah ada tetap bertipe PostgreSQL setelah migrasi platform otomatis `0002_connection_dbms`.
-
-Explorer, schema diff, draft, approval, queue, worker, history, rollback, dan forward menyediakan dukungan MariaDB. Workflow MariaDB menggunakan mode normal untuk satu DDL atau beberapa DML InnoDB dalam satu transaksi. Cursor batch M2 tersedia pada PostgreSQL. Eksekusi MariaDB memakai aturan berikut.
-
-- Satu migration schema berisi **tepat satu statement DDL** tabel, index, atau view, misalnya `ALTER TABLE flights ADD COLUMN gate VARCHAR(10);`.
-- DDL MariaDB melakukan implicit commit. Validasi menolak beberapa DDL sekaligus dan campuran DDL-DML.
-- Rangkaian `INSERT`, `UPDATE`, `DELETE`, `REPLACE`, dan `SELECT` dijalankan dalam transaksi. Database yang mengandung tabel non-InnoDB ditolak untuk batch DML.
-- Kontrol transaksi, perintah administrasi, executable comments, `CREATE OR REPLACE TABLE`, `CREATE TABLE AS SELECT/LIKE`, DDL partisi, serta DROP/RENAME beberapa objek tidak didukung. Referensi ke database lain ditolak.
-- Analisis execution plan tersedia pada koneksi PostgreSQL.
-- Riwayat dan penomoran versi tetap dicatat pada Platform DB. Bukti commit pada Target DB menjadi acuan pemulihan setelah server atau koneksi terputus saat eksekusi. DDL yang berstatus tidak pasti memerlukan rekonsiliasi manual. Bukti baru memakai autentikasi kriptografis berbasis key platform, identitas target, dan token job. Akun koneksi tetap memiliki privilege yang ditentukan administrator database. Akun dengan privilege administratif dipercaya oleh platform. Schema dan tabel internal tidak tampil pada explorer atau schema diff. MariaDB menyimpan token identitas database pada tabel internal saat target pertama kali diikat ke pengajuan.
-
-Perbedaan transaksi ini mengikuti [implicit commit MariaDB](https://mariadb.com/docs/server/reference/sql-statements/transactions/sql-statements-that-cause-an-implicit-commit) dan [atomic DDL MariaDB](https://mariadb.com/docs/server/reference/sql-statements/data-definition/atomic-ddl).
+Koneksi MariaDB development: host `localhost`, port `3307`, database/user/password `target`, SSL `disable`. Explorer, schema diff, workflow, queue, history, rollback, dan forward mendukung MariaDB dalam mode normal. Satu migration berisi tepat satu DDL (karena DDL MariaDB melakukan implicit commit) atau beberapa DML InnoDB dalam satu transaksi. Mode batch hanya tersedia untuk PostgreSQL.
 
 ### Query execution plan analysis (bonus)
 
-Pada editor migration PostgreSQL, pengguna dengan hak Edit dapat menekan **Analisis plan SQL up**. `EXPLAIN` menampilkan estimasi biaya, jumlah baris, scan, index, join, dan filter. `EXPLAIN ANALYZE` mengukur jumlah baris dan waktu aktual hanya untuk SELECT yang lolos pemeriksaan keamanan. Analisis menggunakan transaksi read-only, timeout, function dan operator bawaan yang diizinkan, serta pemeriksaan relasi. DDL dan statement pendukung ditampilkan sebagai statement tanpa plan dan tidak dieksekusi. Query yang bergantung pada DDL sebelumnya dalam preview memerlukan schema yang sudah tersedia. View, RLS, tipe pengguna, function berpotensi mengubah state, dan bentuk query yang tidak dapat dianalisis secara aman ditolak.
+Editor migration PostgreSQL menyediakan **Analisis plan SQL up**. `EXPLAIN` menampilkan estimasi biaya dan scan. `EXPLAIN ANALYZE` hanya dijalankan untuk SELECT yang lolos pemeriksaan keamanan, di dalam transaksi read-only.
 
 ### Schema diff dan migration generation (bonus)
 
-Schema diff membandingkan schema aktif dan schema referensi pada DBMS yang sama. Referensi dapat berasal dari schema lain pada koneksi yang sama atau dari koneksi lain yang dapat diakses pengguna. Hasilnya memuat daftar perubahan, risiko, batasan manual, dan SQL kandidat.
-
-PostgreSQL menyediakan satu draft gabungan. MariaDB menyediakan satu draft per statement sesuai urutan dependensi. Draft tetap dapat diedit sebelum eksekusi. Draft workflow M2 memerlukan SQL down atau alasan irreversible sebelum pengajuan. Penyimpanan draft tidak mengeksekusi SQL pada database target.
-
-Server membuat preview SQL dari metadata katalog. Saat menyimpan draft, server menghitung ulang kandidat, memeriksa hak akses, dan mengembalikan `409` jika fingerprint schema berubah. Layanan `SaveGenerated` menyimpan rangkaian draft secara atomik pada database platform. Eksekusi DDL MariaDB mengikuti aturan implicit commit pada database target.
-
-Objek khusus seperti view, partition, trigger, kolom generated, tipe kustom, partial index, dan foreign key lintas schema memerlukan penanganan manual. Data, owner, grant, fungsi, dan sequence mandiri berada di luar cakupan perbandingan. Default kolom SERIAL PostgreSQL mencakup default sequence bawaan, default pengganti, dan ketiadaan default. Pemulihan default bawaan memakai sequence milik kolom aktif. Constraint PRIMARY KEY dan UNIQUE mencakup kolom INCLUDE. Default yang bergantung pada sequence mandiri atau relasi lain memerlukan pemetaan manual dan tidak menghasilkan SQL otomatis. Penanda manual tetap ditampilkan ketika tidak ada perbedaan dalam cakupan yang didukung.
-
-Penambahan kolom nullable sederhana dapat menghasilkan SQL ketika objek khusus pada tabel lain identik di kedua snapshot. Perubahan lainnya tetap memeriksa objek khusus dan dependensi secara konservatif. Komentar kolom MariaDB dipertahankan saat kolom diubah.
-
-Perubahan tipe, `NOT NULL`, dan constraint baru memerlukan peninjauan SQL serta data yang ada. Batas satu perbandingan adalah 200 tabel, 2.000 kolom, dan 250 statement.
-
-API menyediakan `GET /api/db/{id}/diff/options` untuk pilihan schema, `POST /api/db/{id}/diff` untuk preview, dan `POST /api/db/{id}/diff/drafts` untuk menyimpan kandidat. `POST` memerlukan token CSRF. Hak View mencakup preview, sedangkan penyimpanan draft memerlukan hak Edit.
+Schema diff membandingkan schema aktif dengan schema referensi pada DBMS yang sama, menampilkan perbedaan beserta risikonya, lalu menghasilkan SQL kandidat yang dapat disimpan sebagai draft. Penyimpanan draft tidak mengeksekusi SQL pada database target.
 
 ## Aturan Akses dan Session
 
@@ -186,7 +150,7 @@ Server menyediakan halaman dan endpoint M2 melalui interface `Workflow`, `Leader
 
 Adapter memeriksa grant sebelum memanggil layanan. Enqueue memerlukan header `Idempotency-Key` dan mengembalikan `202` beserta job ID setelah job tersimpan. Worker menjalankan SQL secara asynchronous serta memeriksa ulang izin, revisi, approval, dan checkpoint. Daftar route, termasuk `/api/auth`, `/api/admin`, `/api/db/{id}/migrations`, `/api/db/{id}/requests`, dan `/api/db/{id}/jobs`, ada di [router API](internal/httpx/api.go).
 
-Worker memakai `WORKER_ID` (default hostname-PID), `WORKER_LEASE=30s`, `WORKER_POLL=1s`, `WORKER_LOCK_WAIT=30s`, `WORKER_SQL_TIMEOUT=30m`, dan `WORKER_METRICS_ADDR=:9102`. Setiap worker memakai alamat metrics yang tersedia pada hostnya.
+Worker memakai `WORKER_ID` (default hostname-PID), `WORKER_LEASE=30s`, `WORKER_POLL=1s`, `WORKER_LOCK_WAIT=30s`, `WORKER_SQL_TIMEOUT=30m`, `WORKER_METRICS_ADDR=:9102`, dan `WORKER_CONCURRENCY=4`. `WORKER_CONCURRENCY` adalah jumlah job yang dapat dijalankan satu proses worker secara bersamaan, sehingga job pada database berbeda berjalan paralel tanpa proses worker tambahan. Job pada database yang sama tetap dijalankan satu per satu. Setiap worker memakai alamat metrics yang tersedia pada hostnya.
 
 ### Pemulihan lock ketika worker gagal
 
@@ -334,63 +298,4 @@ Jika `TEST_DATABASE_URL` atau `TEST_MARIADB_DSN` kosong, test integrasi terkait 
 
 Suite mencakup autentikasi, session paralel, CSRF, grant, administrasi, explorer, executor M1, schema diff, revisi, approval, queue, locking, batch, history, dan pemulihan job. Pengujian schema diff menjalankan kandidat DDL pada database sementara dan membandingkan hasilnya dengan referensi.
 
-[Pengujian performa](tests/performance/README.md) mencakup dataset migration besar dan skenario k6 untuk API serta job sampai status terminal.
-
-## Perintah Makefile
-
-| Perintah | Fungsi |
-|---|---|
-| `make worker` | Menjalankan worker dengan environment aplikasi |
-| `make run` | Menyiapkan environment dan database, membangun SPA, lalu menjalankan server |
-| `make db-up` | Menjalankan seluruh database Compose dan menunggu healthcheck |
-| `make build` | Membangun frontend lalu seluruh package Go |
-| `make frontend` | npm ci dan build SPA |
-| `make observability-up` | Menjalankan profile observability dan database |
-| `make observability-down` | Menghentikan lima service observability |
-| `make vet` | Menjalankan `go vet ./...` |
-| `make test` | Menjalankan suite Go dengan database pengujian sesuai environment |
-| `make test-integration` | Menjalankan test bernama `Integration` pada package auth dan HTTP |
-
-`make` bersifat opsional. Perintah Go dan Docker pada bagian sebelumnya dapat dijalankan langsung.
-
-## Struktur Repository
-
-```text
-cmd/
-  server/          Entry point, wiring, startup, dan graceful shutdown
-  worker/          Worker queue persisten dan endpoint metrics
-  envinit/         Membuat .env dengan key acak (dipakai make run)
-  hash-password/   Utilitas Argon2id; membaca password dari stdin
-internal/
-  admin/           Operasi admin dan bootstrap akun pertama
-  auth/            Password, token, session, rotasi, dan CSRF
-  authz/           Policy dan perhitungan hak akses database
-  config/          Konfigurasi environment
-  dbconn/          Enkripsi kredensial dan registry koneksi target
-  explorer/        Pembacaan schema, struktur, dan data
-  batch/           Cursor, checkpoint, resume, dan kompensasi per batch
-  jobs/            Queue persisten dan status job
-  worker/          Eksekusi asynchronous dan lease job
-  workflow/        Revisi, pengajuan, approval, dan history
-  telemetry/       Trace SQL dan metrik worker
-  contracts/       DTO dan interface workflow/jobs/leaders M2
-  httpx/           API JSON, SPA fallback, middleware, handler legacy, dan test HTTP
-  observability/   Provider log/trace serta HTTP/pool metrics
-  migration/       Draft, executor, dan riwayat migration
-  platformdb/      Migrasi schema Platform DB
-  reqctx/          Principal dan CSRF token dalam request context
-  schemadiff/      Snapshot katalog, perbandingan schema, dan SQL kandidat
-  testdb/          Helper PostgreSQL untuk integration test
-  user/            Repository pengguna
-frontend/          React/TypeScript SPA dan lockfile
-deploy/observability/ Collector, Loki, Tempo, Prometheus, Grafana
-.github/           Workflow CI/CodeQL
-scripts/           Seed data Target DB
-web/
-  templates/       Go HTML templates
-  static/          CSS lama dan hasil build SPA yang diabaikan Git
-.env.example       Template konfigurasi development
-docker-compose.yml Database development/test dan profile observability
-Dockerfile         Build SPA dan binary dalam container non-root
-Makefile           Perintah development
-```
+Dataset pengujian migration berisi 2.000.000 baris (`perf.accounts`). Satu UPDATE seluruh baris tanpa batching membutuhkan 9,217 s. Dataset yang sama dalam mode batch 10.000 baris selesai dalam 16,043 s (200 batch). [Pengujian performa](tests/performance/README.md) berisi cara membuat dataset, skrip k6, threshold, serta hasil dan analisis untuk setiap tingkat beban.

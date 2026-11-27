@@ -124,6 +124,50 @@ func (e *e2e) job(id string) contracts.Job {
 
 func (e *e2e) bal() string { return fmt.Sprint(balances(e.t, e.target)) }
 
+func TestEndToEndReviewClosesAfterTerminalJob(t *testing.T) {
+	e := newE2E(t, "e2e_review_terminal")
+	ctx := context.Background()
+	for _, tc := range []struct {
+		status string
+		sql    string
+	}{
+		{status: "failed", sql: "SELECT 1 / 0"},
+		{status: "success", sql: "SELECT 1"},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			m := e.save(tc.sql, "SELECT 1")
+			r := e.approved(contracts.ChangeInput{MigrationID: m.ID, RevisionID: m.RevisionID, Action: "apply", Mode: "normal"})
+			j := e.enqueue(r)
+			active, err := e.svc.Request(ctx, bob, connA, r.ID)
+			e.must(err)
+			if !active.CanApprove {
+				t.Fatal("leader must still be able to review a queued job")
+			}
+			e.drain()
+			if got := e.job(j.ID); got.Status != tc.status {
+				t.Fatalf("job: %+v", got)
+			}
+			for _, decision := range []string{"approve", "reject"} {
+				_, err := e.svc.Review(ctx, bob, connA, r.ID, contracts.Review{Decision: decision})
+				var conflict *contracts.Error
+				if !errors.As(err, &conflict) || conflict.Status != 409 {
+					t.Errorf("%s after job %s should return conflict, got %v", decision, tc.status, err)
+				}
+			}
+			closed, err := e.svc.Request(ctx, bob, connA, r.ID)
+			e.must(err)
+			if closed.Job == nil || closed.Job.Status != tc.status || closed.CanApprove {
+				t.Fatalf("terminal request should remain visible with review disabled: %+v", closed)
+			}
+			for _, approval := range closed.Approvals {
+				if approval.Status != "approved" {
+					t.Fatalf("terminal request must keep its approval decisions: %+v", closed.Approvals)
+				}
+			}
+		})
+	}
+}
+
 func TestEndToEndApplyThenRollbackThroughRealWorkflow(t *testing.T) {
 	e := newE2E(t, "e2e_flow")
 	m := e.save(upSQL, downSQL)
@@ -372,10 +416,16 @@ func TestEndToEndResumeFinishesRemainingBatchesOnly(t *testing.T) {
 		}
 		return nil
 	}
-	job := e.enqueue(e.approved(batchInput(m, "apply", "")))
+	request := e.approved(batchInput(m, "apply", ""))
+	job := e.enqueue(request)
 	e.drain()
 	if got := e.job(job.ID); got.Status != "partial" {
 		t.Fatalf("job: %+v", got)
+	}
+	partial, err := e.svc.Review(ctx, bob, connA, request.ID, contracts.Review{Decision: "approve"})
+	e.must(err)
+	if partial.Job == nil || partial.Job.Status != "partial" || !partial.CanApprove {
+		t.Fatalf("a recoverable job must still allow review: %+v", partial)
 	}
 	e.w.Hooks.BeforeCommit = nil
 	var seen []int

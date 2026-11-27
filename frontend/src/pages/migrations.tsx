@@ -51,5 +51,23 @@ export function MigrationDetail() {
   if (resource.loading) return <Loading />
   if (resource.error) return <ErrorBox error={resource.error} retry={resource.reload} />
   const m = resource.data; if (!m) return null
-  return <><div className="section-head"><h2>{m.name}</h2><Status value={m.status} /></div><WorkflowNotice /><dl className="facts"><div><dt>Migration ID</dt><dd>{m.id}</dd></div><div><dt>Versi/revisi</dt><dd>{m.version ?? 'Draft'} / {m.revision_id || 'Legacy M1'}</dd></div><div><dt>Pembuat</dt><dd>{m.created_by}</dd></div><div><dt>Dibuat</dt><dd>{date(m.created_at)}</dd></div></dl>{m.error_message && <div className="alert error" role="alert">{m.error_message}</div>}<div className="actions">{db.level === 'edit' && capabilities.workflow && <>{m.can_edit && <Link className="button" to={`${dbPath(db.id)}/migrations/${enc(m.id)}/edit`}>Ubah draft</Link>}<Link className="button secondary" to={`${dbPath(db.id)}/migrations/new?from=${enc(m.id)}`}>Salin sebagai migration baru</Link></>}</div><Panel title="SQL up"><SQL value={m.sql_up} /></Panel><Panel title={m.irreversible ? 'Irreversible' : 'SQL down'}>{m.irreversible ? <Notice>{m.irreversible_reason}</Notice> : <SQL value={m.sql_down} />}</Panel><Proposal migrationID={m.id} revisionID={m.revision_id} /></>
+  return <>
+    <div className="section-head"><h2>{m.name}</h2><Status value={m.status} /></div>
+    <WorkflowNotice />
+    <dl className="facts">
+      <div><dt>Migration ID</dt><dd>{m.id}</dd></div>
+      <div><dt>Versi/revisi</dt><dd>{m.version ?? 'Draft'} / {m.revision_id || 'Legacy M1'}</dd></div>
+      <div><dt>Pembuat</dt><dd>{m.created_by}</dd></div>
+      <div><dt>Dibuat</dt><dd>{date(m.created_at)}</dd></div>
+    </dl>
+    {m.error_message && <div className="alert error" role="alert">{m.error_message}</div>}
+    <div className="actions">{db.level === 'edit' && capabilities.workflow && <>
+      {m.can_edit && <Link className="button" to={`${dbPath(db.id)}/migrations/${enc(m.id)}/edit`}>Ubah draft</Link>}
+      <Link className="button secondary" to={`${dbPath(db.id)}/migrations/new?from=${enc(m.id)}`}>Salin sebagai migration baru</Link>
+    </>}</div>
+    {m.apply_block_reason && <Notice>{m.apply_block_reason} <Link to={`${dbPath(db.id)}/history`}>Lihat execution history</Link></Notice>}
+    <Panel title="SQL up"><SQL value={m.sql_up} /></Panel>
+    <Panel title={m.irreversible ? 'Irreversible' : 'SQL down'}>{m.irreversible ? <Notice>{m.irreversible_reason}</Notice> : <SQL value={m.sql_down} />}</Panel>
+    {!m.apply_block_reason && <Proposal migrationID={m.id} revisionID={m.revision_id} />}
+  </>
 }

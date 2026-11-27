@@ -42,7 +42,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, status int, page
 }
 
 func (s *Server) renderError(w http.ResponseWriter, r *http.Request, status int, message string) {
-	if isAPI(r) {
+	if isAPI(r) || s.SPAEnabled {
 		apiError(w, status, http.StatusText(status), message)
 		return
 	}

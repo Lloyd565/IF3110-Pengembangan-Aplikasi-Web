@@ -147,4 +147,31 @@ func TestIntegrationWorkflowAPI(t *testing.T) {
 	if code, raw = bob.do("GET", base+"/history?hide_rollback=true", nil); code != 200 || string(raw) != "[]" {
 		t.Fatalf("history: %d %s", code, raw)
 	}
+
+	apply := map[string]any{"migration_id": m.ID, "revision_id": m.RevisionID, "action": "apply", "mode": "normal"}
+	code, raw = alice.do("POST", base+"/requests", apply)
+	var existing struct {
+		ID         string   `json:"id"`
+		CanSubmit  bool     `json:"can_submit"`
+		Validation []string `json:"validation"`
+	}
+	if code != 201 || json.Unmarshal(raw, &existing) != nil || !existing.CanSubmit {
+		t.Fatalf("draft sebelum apply: %d %s", code, raw)
+	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO migration_executions (connection_id, migration_id, revision_id, action, status, sql, actor_id, finished_at)
+		SELECT connection_id, migration_id, revision_id, 'apply', 'success', 'SELECT 1', 1, now()
+		FROM migration_requests WHERE id=$1`, req.ID); err != nil {
+		t.Fatal(err)
+	}
+	if code, raw = alice.do("POST", base+"/requests", apply); code != 409 || !strings.Contains(string(raw), "Migration sudah aktif") {
+		t.Fatalf("apply ulang harus ditolak sebelum membuat draft: %d %s", code, raw)
+	}
+	if code, raw = alice.do("GET", base+"/migrations/"+m.ID, nil); code != 200 || !strings.Contains(string(raw), `"apply_block_reason":"Migration sudah aktif`) {
+		t.Fatalf("detail migration aktif harus menampilkan alasan: %d %s", code, raw)
+	}
+	if code, raw = alice.do("GET", base+"/requests/"+existing.ID, nil); code != 200 ||
+		json.Unmarshal(raw, &existing) != nil || existing.CanSubmit || len(existing.Validation) == 0 {
+		t.Fatalf("draft lama tetap dapat dibuka dengan validasi: %d %s", code, raw)
+	}
 }
