@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -120,10 +121,20 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	log.Printf("worker %s berjalan; metrics di %s", id, addr)
-	if err := w.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Printf("worker berhenti: %v", err)
+	n, err := strconv.Atoi(os.Getenv("WORKER_CONCURRENCY"))
+	if err != nil || n < 1 {
+		n = 4
 	}
+	log.Printf("worker %s berjalan dengan %d slot; metrics di %s", id, n, addr)
+	var wg sync.WaitGroup
+	for range n {
+		wg.Go(func() {
+			if err := w.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("worker berhenti: %v", err)
+			}
+		})
+	}
+	wg.Wait()
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	metricsServer.Shutdown(shutdown)
