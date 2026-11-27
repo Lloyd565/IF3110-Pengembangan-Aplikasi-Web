@@ -49,11 +49,13 @@ export function RequestDetail() {
   const resource = useResource<ChangeRequest>(capabilities.workflow ? `${dbApi(db.id)}/requests/${enc(rid)}` : null)
   const key = useMemo(() => newKey(), [rid])
   const jobStatus = resource.data?.job?.status
+  const requestStatus = resource.data?.status
+  const inReview = requestStatus === 'pending_review' || requestStatus === 'approved' || requestStatus === 'rejected'
   useEffect(() => {
-    if (resource.loading || resource.error || (jobStatus !== 'queued' && jobStatus !== 'running')) return
+    if (resource.loading || resource.error || (!inReview && jobStatus !== 'queued' && jobStatus !== 'running')) return
     const timer = window.setTimeout(resource.reload, 3000)
     return () => window.clearTimeout(timer)
-  }, [jobStatus, resource.loading, resource.error, resource.reload])
+  }, [inReview, jobStatus, resource.loading, resource.error, resource.reload])
   if (!capabilities.workflow) return <WorkflowNotice />
   if (resource.loading && !resource.data) return <Loading />
   if (!resource.data) return <ErrorBox error={resource.error} retry={resource.reload} />
@@ -67,8 +69,14 @@ export function RequestDetail() {
       <div><dt>Pengajuan</dt><dd>{x.id}</dd></div><div><dt>Revisi</dt><dd>{x.revision_id}</dd></div>
       <div><dt>Aksi</dt><dd>{x.action}</dd></div><div><dt>Mode</dt><dd>{x.mode}{x.mode === 'batch' && ` · ${x.batch_size} row/batch`}</dd></div>
     </dl>
-    <Panel title="Validasi dan SQL yang ditinjau">{(x.validation ?? []).map((v, i) => <Notice key={i}>{v}</Notice>)}{x.mode === 'batch' && <p>Cursor: <code>{x.cursor_column}</code> · Cakupan: {x.scope}</p>}<SQL value={x.sql} /><p className="muted small">Persetujuan terikat pada revisi, arah, mode, dan cakupan. Worker memeriksanya kembali sebelum eksekusi.</p></Panel>
-    <Panel title="Persetujuan leader group"><TableWrap><table><thead><tr><th>Group</th><th>Leader</th><th>Status</th><th>Komentar</th></tr></thead><tbody>{(x.approvals ?? []).map(a => <tr key={a.group_id}><td>{a.group_name}</td><td>{a.leader_name || 'Belum ditetapkan'}</td><td><Status value={a.status} /></td><td>{a.comment || '—'}</td></tr>)}</tbody></table></TableWrap>{(x.approvals ?? []).length === 0 && <Notice>Daftar leader belum tersedia. Eksekusi tetap menunggu validasi server.</Notice>}{x.can_submit && <Action run={async () => { await api(`${dbApi(db.id)}/requests/${enc(rid)}/submit`, { method: 'POST', body: {} }); resource.reload() }}>Kirim untuk review</Action>}{x.can_approve && <Form onSubmit={async d => { await api(`${dbApi(db.id)}/requests/${enc(rid)}/review`, { method: 'POST', body: { decision: text(d, 'decision'), comment: text(d, 'comment') } }); resource.reload() }}><Field label="Komentar review"><textarea name="comment" rows={3} maxLength={4000} /></Field><div className="actions"><button name="decision" value="approve">Setujui perubahan</button><button name="decision" value="reject" className="danger">Tolak perubahan</button></div></Form>}</Panel>
+    <Panel title="Validasi dan SQL yang ditinjau">
+      {(x.validation ?? []).map((v, i) => <Notice key={i}>{v}</Notice>)}
+      {x.status === 'draft' && !!x.validation?.length && <Link to={`${dbPath(db.id)}/migrations/${enc(x.migration_id)}`}>Buka detail migration</Link>}
+      {x.mode === 'batch' && <p>Cursor: <code>{x.cursor_column}</code> · Cakupan: {x.scope}</p>}
+      <SQL value={x.sql} />
+      <p className="muted small">Persetujuan terikat pada revisi, arah, mode, dan cakupan. Worker memeriksanya kembali sebelum eksekusi.</p>
+    </Panel>
+    <Panel title="Persetujuan leader group"><TableWrap><table><thead><tr><th>Group</th><th>Leader</th><th>Status</th><th>Komentar</th></tr></thead><tbody>{(x.approvals ?? []).map(a => <tr key={a.group_id}><td>{a.group_name}</td><td>{a.leader_name || 'Belum ditetapkan'}</td><td><Status value={a.status} label={x.status === 'draft' && a.status === 'pending' ? 'Belum dikirim' : undefined} /></td><td>{a.comment || '—'}</td></tr>)}</tbody></table></TableWrap>{(x.approvals ?? []).length === 0 && <Notice>Daftar leader belum tersedia. Eksekusi tetap menunggu validasi server.</Notice>}{x.can_submit && <Action run={async () => { await api(`${dbApi(db.id)}/requests/${enc(rid)}/submit`, { method: 'POST', body: {} }); resource.reload() }}>Kirim untuk review</Action>}{x.can_approve && <Form onSubmit={async d => { await api(`${dbApi(db.id)}/requests/${enc(rid)}/review`, { method: 'POST', body: { decision: text(d, 'decision'), comment: text(d, 'comment') } }); resource.reload() }}><Field label="Komentar review"><textarea name="comment" rows={3} maxLength={4000} /></Field><div className="actions"><button name="decision" value="approve">Setujui perubahan</button><button name="decision" value="reject" className="danger">Tolak perubahan</button></div></Form>}</Panel>
     {x.can_enqueue && db.level === 'edit' && <Panel title="Kirim ke queue"><p>Pengiriman mengembalikan job ID. Keberhasilan SQL dipantau pada halaman job.</p><Action confirm="Masukkan perubahan yang disetujui ini ke queue?" run={async () => { const job = await api<Job>(`${dbApi(db.id)}/requests/${enc(rid)}/enqueue`, { method: 'POST', body: {}, key }); navigate(`${dbPath(db.id)}/jobs/${enc(job.id)}`) }}>Masukkan ke queue</Action></Panel>}
   </>
 }

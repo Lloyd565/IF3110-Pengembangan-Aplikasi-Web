@@ -182,7 +182,16 @@ func (s *Service) Get(ctx context.Context, _ reqctx.Principal, connID uuid.UUID,
 	if err != nil {
 		return contracts.Migration{}, err
 	}
-	return scanMigration(s.DB.QueryRow(ctx, selectMigration+` WHERE m.connection_id = $1 AND m.id = $2`, connID, id))
+	m, err := scanMigration(s.DB.QueryRow(ctx, selectMigration+` WHERE m.connection_id = $1 AND m.id = $2`, connID, id))
+	if err != nil {
+		return m, err
+	}
+	pos, err := loadPosition(ctx, s.DB, connID)
+	if err != nil {
+		return m, err
+	}
+	m.ApplyBlockReason = pos.applyBlockReason(id)
+	return m, nil
 }
 
 func (s *Service) Save(ctx context.Context, p reqctx.Principal, connID uuid.UUID, mid string, d contracts.Draft) (contracts.Migration, error) {
@@ -443,6 +452,7 @@ func approvals(ctx context.Context, q querier, x request) ([]contracts.Approval,
 		LEFT JOIN group_leaders gl ON gl.group_id = g.id
 		LEFT JOIN users u ON u.id = gl.user_id AND u.is_active
 		LEFT JOIN migration_approvals a ON a.request_id = $2 AND a.group_id = g.id AND a.leader_id = u.id
+			AND a.decided_at >= gl.updated_at
 		WHERE dg.connection_id = $1
 		ORDER BY g.name`, x.connID, x.ID)
 	if err != nil {
@@ -643,7 +653,15 @@ func (s *Service) ProposeUsing(ctx context.Context, tx pgx.Tx, p reqctx.Principa
 		if !ok {
 			return migration.ErrNotFound
 		}
-		if in.Action != "apply" {
+		if in.Action == "apply" {
+			pos, err := loadPosition(ctx, tx, connID)
+			if err != nil {
+				return err
+			}
+			if msg := pos.applyBlockReason(mid); msg != "" {
+				return conflict(msg)
+			}
+		} else {
 			t, err := parseUUID(in.TargetExecutionID)
 			if err != nil {
 				return migration.ValidationError("Rollback/forward memerlukan execution target.")

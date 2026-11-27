@@ -26,16 +26,17 @@ type Draft struct {
 
 type Migration struct {
 	Draft
-	ID           string    `json:"id"`
-	DatabaseID   string    `json:"database_id"`
-	RevisionID   string    `json:"revision_id"`
-	Version      *int      `json:"version"`
-	DBMS         string    `json:"dbms"`
-	Status       string    `json:"status"`
-	CreatedAt    time.Time `json:"created_at"`
-	CreatedBy    string    `json:"created_by"`
-	ErrorMessage string    `json:"error_message,omitempty"`
-	CanEdit      bool      `json:"can_edit"`
+	ID               string    `json:"id"`
+	DatabaseID       string    `json:"database_id"`
+	RevisionID       string    `json:"revision_id"`
+	Version          *int      `json:"version"`
+	DBMS             string    `json:"dbms"`
+	Status           string    `json:"status"`
+	CreatedAt        time.Time `json:"created_at"`
+	CreatedBy        string    `json:"created_by"`
+	ErrorMessage     string    `json:"error_message,omitempty"`
+	CanEdit          bool      `json:"can_edit"`
+	ApplyBlockReason string    `json:"apply_block_reason,omitempty"`
 }
 
 type ChangeInput struct {

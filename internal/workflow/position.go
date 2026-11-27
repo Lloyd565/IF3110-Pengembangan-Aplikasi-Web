@@ -79,6 +79,16 @@ func top(stack []int64) int64 {
 	return stack[len(stack)-1]
 }
 
+func (p position) applyBlockReason(migrationID int64) string {
+	if slices.Contains(p.active, migrationID) {
+		return "Migration sudah aktif. Gunakan rollback atau buat migration baru."
+	}
+	if slices.Contains(p.undone, migrationID) {
+		return "Migration ini sudah di-rollback; gunakan forward untuk menerapkannya kembali."
+	}
+	return ""
+}
+
 func (p position) check(action string, migrationID int64, target string) string {
 	if action == "rollback" && p.blockedID != "" && p.blockedID == target && (p.blockedStatus == "partial" || p.blockedStatus == "partially_reverted" || p.blockedStatus == "commit_unknown") {
 		return ""
@@ -88,12 +98,7 @@ func (p position) check(action string, migrationID int64, target string) string 
 	}
 	switch action {
 	case "apply":
-		if slices.Contains(p.active, migrationID) {
-			return "Migration sudah aktif. Gunakan rollback atau buat migration baru."
-		}
-		if slices.Contains(p.undone, migrationID) {
-			return "Migration ini sudah di-rollback; gunakan forward untuk menerapkannya kembali."
-		}
+		return p.applyBlockReason(migrationID)
 	case "rollback":
 		if top(p.active) != migrationID {
 			return "Rollback hanya untuk migration aktif terakhir."

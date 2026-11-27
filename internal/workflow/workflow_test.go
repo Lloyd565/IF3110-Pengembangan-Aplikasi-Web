@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -148,7 +149,8 @@ func TestWorkflowIntegration(t *testing.T) {
 	}
 
 	t.Run("pergantian leader membatalkan approval lama", func(t *testing.T) {
-		if err := (&Leaders{DB: db}).Set(ctx, alice, 10, 3); err != nil {
+		leaders := &Leaders{DB: db}
+		if err := leaders.Set(ctx, alice, 10, 3); err != nil {
 			t.Fatal(err)
 		}
 		got := must[contracts.ChangeRequest](t)(s.Request(ctx, carol, conn, x.ID))
@@ -158,6 +160,26 @@ func TestWorkflowIntegration(t *testing.T) {
 		x = must[contracts.ChangeRequest](t)(s.Review(ctx, carol, conn, x.ID, contracts.Review{Decision: "approve"}))
 		if x.Status != "approved" {
 			t.Fatal(x.Status)
+		}
+		if err := leaders.Set(ctx, alice, 10, 3); err != nil {
+			t.Fatal(err)
+		}
+		if got := must[contracts.ChangeRequest](t)(s.Request(ctx, carol, conn, x.ID)); got.Status != "approved" {
+			t.Fatalf("menetapkan leader yang sama harus mempertahankan approval: %+v", got)
+		}
+		if err := leaders.Set(ctx, alice, 10, 1); err != nil {
+			t.Fatal(err)
+		}
+		got = must[contracts.ChangeRequest](t)(s.Request(ctx, alice, conn, x.ID))
+		if got.Status != "pending_review" || !got.CanApprove || got.CanEnqueue {
+			t.Fatalf("leader lama yang ditetapkan kembali harus review ulang: %+v", got)
+		}
+		if err := leaders.Set(ctx, alice, 10, 3); err != nil {
+			t.Fatal(err)
+		}
+		x = must[contracts.ChangeRequest](t)(s.Review(ctx, carol, conn, x.ID, contracts.Review{Decision: "approve"}))
+		if x.Status != "approved" {
+			t.Fatalf("approval baru dan approval group lain harus cukup: %+v", x)
 		}
 	})
 
@@ -211,8 +233,11 @@ func TestWorkflowIntegration(t *testing.T) {
 	if fw.SQL != "CREATE TABLE t (id bigint)" {
 		t.Fatalf("forward SQL = %q", fw.SQL)
 	}
-	if got := must[contracts.Migration](t)(s.Get(ctx, carol, conn, m.ID)); got.Status != "rolled_back" || got.CanEdit {
+	if got := must[contracts.Migration](t)(s.Get(ctx, carol, conn, m.ID)); got.Status != "rolled_back" || got.CanEdit || !strings.Contains(got.ApplyBlockReason, "forward") {
 		t.Fatalf("status definisi = %+v", got)
+	}
+	if _, err := s.Propose(ctx, carol, conn, contracts.ChangeInput{MigrationID: m.ID, RevisionID: m.RevisionID, Action: "apply"}); status(t, err) != 409 || !strings.Contains(err.Error(), "forward") {
+		t.Fatalf("apply setelah rollback harus diarahkan ke forward: %v", err)
 	}
 
 	t.Run("irreversible tidak bisa di-rollback", func(t *testing.T) {
