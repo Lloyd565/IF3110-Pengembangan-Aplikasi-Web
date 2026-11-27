@@ -481,7 +481,7 @@ func (r *Runner) runBatches(ctx context.Context, s *session, sp Spec, rn run, re
 	if err := validateCursor(ctx, s.conn, sp); err != nil {
 		return Progress{}, err
 	}
-	replaySQL, trackRows, err := sqlpolicy.BatchReplay(sp.SQL, sp.Column, false)
+	replaySQL, trackRows, err := sqlpolicy.BatchStatement(sp.SQL, sp.Column, false)
 	if err != nil {
 		return Progress{}, ErrInvalidSpec
 	}
@@ -519,7 +519,7 @@ func (r *Runner) runBatches(ctx context.Context, s *session, sp Spec, rn run, re
 
 		return prog, fmt.Errorf("%w: run %s tidak punya cakupan batch", ErrInvalidSpec, sp.Op)
 	}
-	next := fmt.Sprintf(`SELECT max(c) FROM (SELECT %s AS c FROM %s WHERE %s > $1 AND %s <= $2 ORDER BY %s LIMIT $3) s`, col, tbl, col, col, col)
+	next := fmt.Sprintf(`SELECT max(c) FROM (SELECT %s AS c FROM %s WHERE %s > $1::bigint AND %s <= $2::bigint ORDER BY %s LIMIT $3) s`, col, tbl, col, col, col)
 	recordSQL := r.RecordSQL
 	for {
 		if err := ctx.Err(); err != nil {
@@ -696,7 +696,7 @@ func (r *Runner) Compensate(ctx context.Context, sp Spec, report func(Progress))
 		WHERE root_job = $1 AND op = 'down'`, sp.RootID).Scan(&prog.Batches, &prog.Rows); err != nil {
 		return prog, err
 	}
-	downSQL, tracked, err := sqlpolicy.BatchReplay(sp.SQL, sp.Column, true)
+	downSQL, tracked, err := sqlpolicy.BatchStatement(sp.SQL, sp.Column, true)
 	if err != nil || !tracked {
 		return prog, ErrUnsafe
 	}

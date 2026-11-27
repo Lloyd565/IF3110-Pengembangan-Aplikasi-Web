@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -34,6 +35,45 @@ func newTarget(t *testing.T, name string) *pgxpool.Pool {
 
 func batchSpec(root int64, op, sql string) Spec {
 	return Spec{RootID: root, Op: op, SQL: sql, Size: 100, Table: "perf.accounts", Column: "id"}
+}
+
+func TestBatchSupportsIntegerCursorBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind string
+		min  int64
+	}{
+		{name: "smallint", kind: "smallint", min: math.MinInt16},
+		{name: "integer", kind: "integer", min: math.MinInt32},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := testdb.Fresh(t, "batch_cursor_"+tc.name)
+			if _, err := db.Exec(ctx, fmt.Sprintf(`
+				CREATE SCHEMA perf;
+				CREATE TABLE perf.accounts (id %s PRIMARY KEY, balance bigint NOT NULL);
+				INSERT INTO perf.accounts VALUES (%d, 100), (1, 100), (2, 100)`, tc.kind, tc.min)); err != nil {
+				t.Fatal(err)
+			}
+			runner := &Runner{Pool: db, EvidenceKey: testKey}
+			apply := batchSpec(1, OpUp, upSQL)
+			apply.Size = 2
+			if p, err := runner.Run(ctx, apply, nil); err != nil || p.Batches != 2 || p.Rows != 3 {
+				t.Fatalf("apply: %+v, %v", p, err)
+			}
+			if got := balances(t, db); got[101] != 3 {
+				t.Fatalf("apply must include the minimum cursor value: %v", got)
+			}
+			down := apply
+			down.Op, down.SQL = OpDown, downSQL
+			if p, err := runner.Compensate(ctx, down, nil); err != nil || p.Batches != 2 || p.Rows != 3 {
+				t.Fatalf("compensate: %+v, %v", p, err)
+			}
+			if got := balances(t, db); got[100] != 3 {
+				t.Fatalf("compensation must restore all three rows: %v", got)
+			}
+		})
+	}
 }
 
 func balances(t *testing.T, db *pgxpool.Pool) map[int64]int {

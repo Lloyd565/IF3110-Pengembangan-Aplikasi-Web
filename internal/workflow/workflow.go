@@ -509,14 +509,34 @@ func validation(x request, pos position) []string {
 	return out
 }
 
+func jobReviewOpen(status string) bool {
+	switch status {
+	case "queued", "running", "partial", "partially_reverted", "commit_unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+func (x request) reviewOpen() bool {
+	if x.stored == "pending_review" {
+		return x.Status != "stale"
+	}
+	return x.stored == "queued" && x.Job != nil && jobReviewOpen(x.Job.Status)
+}
+
 func (s *Service) flags(ctx context.Context, q querier, p reqctx.Principal, x *request) {
 	edit := authz.CanUsing(ctx, q, p, x.connID, authz.MigrationExecute) == nil
 	valid := len(x.Validation) == 0
 	x.CanSubmit = x.Status == "draft" && edit && valid
 	x.CanEnqueue = x.Status == "approved" && edit && valid
+	if !x.reviewOpen() {
+		return
+	}
 	for _, a := range x.Approvals {
-		if a.LeaderID == p.UserID && (x.Status == "pending_review" || x.Status == "approved" || x.Status == "rejected" || x.Status == "queued") {
+		if a.LeaderID == p.UserID {
 			x.CanApprove = true
+			return
 		}
 	}
 }
@@ -724,7 +744,7 @@ func (s *Service) Review(ctx context.Context, p reqctx.Principal, connID uuid.UU
 		if err != nil {
 			return err
 		}
-		if (x.stored != "pending_review" && x.stored != "queued") || x.Status == "stale" {
+		if !x.reviewOpen() {
 			return conflict("Pengajuan tidak sedang menunggu review.")
 		}
 		if f.Decision != "approve" && f.Decision != "reject" || utf8.RuneCountInString(f.Comment) > 4000 {
@@ -742,6 +762,17 @@ func (s *Service) Review(ctx context.Context, p reqctx.Principal, connID uuid.UU
 			}
 			if err := s.validateTarget(ctx, tx, connID, &x, true); err != nil {
 				return err
+			}
+		}
+		if x.stored == "queued" {
+			var status, hold string
+			err := tx.QueryRow(ctx, `SELECT status, hold FROM jobs
+				WHERE request_id = $1 AND connection_id = $2 ORDER BY id DESC LIMIT 1 FOR UPDATE`, x.ID, connID).Scan(&status, &hold)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if err != nil || !jobReviewOpen(contracts.PublicJobStatus(status, hold)) {
+				return conflict("Pengajuan tidak sedang menunggu review.")
 			}
 		}
 		led := 0

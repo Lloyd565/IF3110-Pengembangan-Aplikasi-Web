@@ -1,9 +1,39 @@
 package sqlpolicy
 
 import (
+	"strings"
+
 	pg "github.com/pganalyze/pg_query_go/v6"
 	parser "github.com/wasilibs/go-pgquery"
 )
+
+func BatchStatement(source, column string, down bool) (string, bool, error) {
+	sql, tracked, err := BatchReplay(source, column, down)
+	if err != nil {
+		return "", false, err
+	}
+	tokens, err := parser.Scan(sql)
+	if err != nil {
+		return "", false, err
+	}
+	var statement strings.Builder
+	last := 0
+	for _, token := range tokens.Tokens {
+		if token.Token != pg.Token_PARAM {
+			continue
+		}
+		param := sql[token.Start:token.End]
+		number := strings.TrimLeft(param[1:], "0")
+		if number != "1" && number != "2" {
+			continue
+		}
+		statement.WriteString(sql[last:token.Start])
+		statement.WriteString("(" + param + "::bigint)")
+		last = int(token.End)
+	}
+	statement.WriteString(sql[last:])
+	return statement.String(), tracked, nil
+}
 
 func BatchReplay(source, column string, down bool) (string, bool, error) {
 	tree, err := Parse(source)

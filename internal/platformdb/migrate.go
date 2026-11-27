@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-//go:embed migrations/*.sql
+
 var migrationFiles embed.FS
 
 func Migrate(ctx context.Context, db *pgxpool.Pool) error {
