@@ -56,7 +56,7 @@ func newE2E(t *testing.T, name string) *e2e {
 	svc := &workflow.Service{DB: db, Authz: az, Queue: jobs.Queue{}}
 	target := newTarget(t, name+"_target")
 	targets := &env{t: t, platform: db, targets: map[uuid.UUID]*pgxpool.Pool{connA: target}, flow: &fakeFlow{}}
-	w := &Worker{DB: db, Flow: svc, Targets: targets, ID: "e2e", Lease: 600 * time.Millisecond, Poll: 10 * time.Millisecond,
+	w := &Worker{DB: db, Flow: svc, Targets: targets, ID: "e2e", Lease: 5 * time.Second, Poll: 10 * time.Millisecond,
 		LockWait: 300 * time.Millisecond, ReconcileWait: 300 * time.Millisecond, Backoff: func(int) time.Duration { return 0 }}
 	return &e2e{t: t, db: db, target: target, svc: svc, js: &jobs.Service{DB: db, Authz: az, Flow: svc}, w: w}
 }
