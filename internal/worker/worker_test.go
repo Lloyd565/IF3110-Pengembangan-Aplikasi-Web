@@ -63,7 +63,7 @@ func (f *fakeFlow) Prepare(ctx context.Context, rid string) (workflow.Plan, erro
 	return f.plan, nil
 }
 
-func (f *fakeFlow) PrepareRecovery(ctx context.Context, rid string) (workflow.Plan, error) {
+func (f *fakeFlow) PrepareRecovery(ctx context.Context, rid string, _ int64) (workflow.Plan, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.recovered++

@@ -87,10 +87,14 @@ func (q Queue) Enqueue(ctx context.Context, tx pgx.Tx, plan workflow.Plan, key s
 func Public(j *Job) contracts.Job {
 	var plan workflow.Plan
 	_ = json.Unmarshal(j.Plan, &plan)
+	total := j.TotalRows
+	if j.Status == StatusSucceeded && plan.Mode == "batch" {
+		total = &j.CommittedRows
+	}
 	return contracts.Job{
 		ID: strconv.FormatInt(j.ID, 10), DatabaseID: j.ConnectionID.String(), RequestID: j.RequestID.String(),
 		MigrationID: plan.MigrationID, ExecutionID: j.ExecutionID, Status: j.PublicStatus(),
-		CommittedRows: j.CommittedRows, CommittedBatches: j.CommittedBatches, TotalRows: j.TotalRows,
+		CommittedRows: j.CommittedRows, CommittedBatches: j.CommittedBatches, TotalRows: total,
 		Attempt: j.Attempt, LastError: j.Error,
 		// commit_unknown dipulihkan lewat resume: worker membaca bukti di target lebih dulu, baru melanjutkan.
 		CanResume: j.Status == StatusFailed && (j.Hold == HoldPartial || j.Hold == HoldCommitUnknown) && j.Kind != KindCompensate,

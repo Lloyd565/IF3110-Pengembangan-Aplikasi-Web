@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -152,7 +153,8 @@ func TestEndToEndApplyThenRollbackThroughRealWorkflow(t *testing.T) {
 		t.Fatalf("balance = %s", e.bal())
 	}
 	h := e.history(false)
-	if len(h) != 1 || h[0].Status != "success" || h[0].Action != "apply" || h[0].SQL != upSQL {
+	if len(h) != 1 || h[0].Status != "success" || h[0].Action != "apply" ||
+		!strings.Contains(h[0].SQL, "RETURNING accounts.id, accounts.xmin::text, accounts.ctid::text") {
 		t.Fatalf("history harus memuat attempt sukses dengan SQL yang dijalankan: %+v", h)
 	}
 
@@ -166,7 +168,8 @@ func TestEndToEndApplyThenRollbackThroughRealWorkflow(t *testing.T) {
 	if e.bal() != "map[100:1000]" {
 		t.Fatalf("setelah rollback balance = %s", e.bal())
 	}
-	if full := e.history(false); len(full) != 2 || full[1].RevertsExecutionID != h[0].ID {
+	if full := e.history(false); len(full) != 2 || full[1].RevertsExecutionID != h[0].ID ||
+		!strings.Contains(full[1].SQL, "accounts.id = ANY(") {
 		t.Fatalf("history lengkap harus memuat apply dan rollback yang merujuk execution-nya: %+v", full)
 	}
 	if hidden := e.history(true); len(hidden) != 0 {
@@ -188,8 +191,28 @@ func TestEndToEndForwardAfterRollbackStaysVisibleWhenPairIsHidden(t *testing.T) 
 	}
 	rollbackID := e.history(false)[1].ID
 
+	// A draft saved by the old UI may already have the incompatible mode.
+	ctx := context.Background()
+	stale, err := e.svc.Propose(ctx, carol, connA, contracts.ChangeInput{
+		MigrationID: m.ID, RevisionID: m.RevisionID, Action: "forward", TargetExecutionID: rollbackID,
+	})
+	e.must(err)
+	_, err = e.db.Exec(ctx, `UPDATE migration_requests SET mode='normal',batch_size=0,cursor_column='',scope='' WHERE id=$1::uuid`, stale.ID)
+	e.must(err)
+	stale, err = e.svc.Request(ctx, carol, connA, stale.ID)
+	e.must(err)
+	if stale.CanSubmit || len(stale.Validation) == 0 {
+		t.Fatalf("legacy draft must explain why a fresh proposal is required: %+v", stale)
+	}
+
 	// forward menerapkan kembali satu langkah dan tidak menjalankan migration berikutnya.
-	fw := e.enqueue(e.approved(batchInput(m, "forward", rollbackID)))
+	proposal := e.approved(contracts.ChangeInput{
+		MigrationID: m.ID, RevisionID: m.RevisionID, Action: "forward", TargetExecutionID: rollbackID, Mode: "normal",
+	})
+	if proposal.Mode != "batch" || proposal.BatchSize != 100 || proposal.CursorColumn != "id" || proposal.Scope != "perf.accounts" {
+		t.Fatalf("forward should inherit the original batch configuration: %+v", proposal)
+	}
+	fw := e.enqueue(proposal)
 	e.drain()
 	if got := e.job(fw.ID); got.Status != "success" || got.CommittedRows != rows {
 		t.Fatalf("forward: %+v", got)
@@ -204,6 +227,48 @@ func TestEndToEndForwardAfterRollbackStaysVisibleWhenPairIsHidden(t *testing.T) 
 	hidden := e.history(true)
 	if len(hidden) != 1 || hidden[0].ID != full[2].ID {
 		t.Fatalf("Hide rollback menyembunyikan pasangan apply dan rollback, forward tetap terlihat: %+v", hidden)
+	}
+}
+
+func TestEndToEndFilteredBatchReportsActualTotal(t *testing.T) {
+	e := newE2E(t, "e2e_filtered_batch")
+	m := e.save(upSQL+" AND id % 2 = 0", downSQL+" AND id % 2 = 0")
+	job := e.enqueue(e.approved(batchInput(m, "apply", "")))
+	e.drain()
+
+	got := e.job(job.ID)
+	if got.Status != "success" || got.CommittedRows != rows/2 || got.TotalRows == nil || *got.TotalRows != got.CommittedRows {
+		t.Fatalf("finished job should report the actual affected row count: %+v", got)
+	}
+	if e.bal() != "map[100:500 101:500]" {
+		t.Fatalf("expected half the rows to change: %s", e.bal())
+	}
+}
+
+func TestEndToEndHistoryDistinguishesPlanFromDispatchedSQL(t *testing.T) {
+	e := newE2E(t, "e2e_sql_dispatch")
+	_, err := e.target.Exec(context.Background(), "TRUNCATE perf.accounts")
+	e.must(err)
+	empty := e.save(upSQL, downSQL)
+	job := e.enqueue(e.approved(batchInput(empty, "apply", "")))
+	e.drain()
+	if got := e.job(job.ID); got.Status != "success" || got.CommittedBatches != 0 {
+		t.Fatalf("empty batch job: %+v", got)
+	}
+	h := e.history(false)
+	if len(h) != 1 || h[0].SQL != "" || h[0].SQLSource != "not_dispatched" || h[0].PlannedSQL != upSQL {
+		t.Fatalf("empty batch should show the plan separately: %+v", h)
+	}
+
+	failed := e.save("SELECT 1 / 0", "SELECT 1")
+	job = e.enqueue(e.approved(contracts.ChangeInput{
+		MigrationID: failed.ID, RevisionID: failed.RevisionID, Action: "apply", Mode: "normal",
+	}))
+	e.drain()
+	h = e.history(false)
+	if len(h) != 2 || h[1].Status != "failed" || h[1].SQL != "SELECT 1 / 0" || h[1].SQLSource != "dispatched" ||
+		h[1].ID != e.job(job.ID).ExecutionID {
+		t.Fatalf("failed statement should be recorded as dispatched: %+v", h)
 	}
 }
 
@@ -345,8 +410,8 @@ func TestEndToEndResumeFinishesRemainingBatchesOnly(t *testing.T) {
 		t.Fatalf("tidak boleh ada double commit: %s", e.bal())
 	}
 	h := e.history(false)
-	if h[len(h)-1].Status != "success" {
-		t.Fatalf("attempt resume yang sukses menjadi attempt terakhir: %+v", h)
+	if h[0].Actor != alice.Username || h[len(h)-1].Status != "success" || h[len(h)-1].Actor != carol.Username {
+		t.Fatalf("history must retain the original actor and credit the resumer: %+v", h)
 	}
 	// penahan terlepas setelah resume berhasil.
 	other := e.save("SELECT 1", "SELECT 2")

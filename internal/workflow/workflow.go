@@ -310,7 +310,8 @@ func loadPosition(ctx context.Context, q querier, connID uuid.UUID) (position, e
 func (s *Service) History(ctx context.Context, _ reqctx.Principal, connID uuid.UUID, hide bool) ([]contracts.Execution, error) {
 	rows, err := s.DB.Query(ctx, `
 		SELECT e.id::text, e.migration_id, m.name, e.revision_id::text, e.action, e.status, u.username::text,
-		       e.started_at, e.sql, e.attempt, coalesce(e.reverts_execution_id::text, ''), coalesce(e.error_message, ''),
+		       e.started_at, e.sql, e.executed_sql, e.sql_dispatch_tracked, e.attempt,
+		       coalesce(e.reverts_execution_id::text, ''), coalesce(e.error_message, ''),
 		       r.irreversible
 		FROM migration_executions e
 		JOIN migrations m ON m.id = e.migration_id
@@ -330,10 +331,20 @@ func (s *Service) History(ctx context.Context, _ reqctx.Principal, connID uuid.U
 	var history []attempt
 	for rows.Next() {
 		var x row
-		var errMsg string
+		var errMsg, plannedSQL string
+		var executedSQL *string
+		var dispatchTracked bool
 		if err := rows.Scan(&x.ID, &x.migrationID, &x.MigrationName, &x.RevisionID, &x.Action, &x.Status, &x.Actor,
-			&x.At, &x.SQL, &x.Attempt, &x.RevertsExecutionID, &errMsg, &x.irreversible); err != nil {
+			&x.At, &plannedSQL, &executedSQL, &dispatchTracked, &x.Attempt, &x.RevertsExecutionID, &errMsg, &x.irreversible); err != nil {
 			return nil, err
+		}
+		switch {
+		case executedSQL != nil:
+			x.SQL, x.SQLSource = *executedSQL, "dispatched"
+		case dispatchTracked:
+			x.PlannedSQL, x.SQLSource = plannedSQL, "not_dispatched"
+		default:
+			x.SQL, x.SQLSource = plannedSQL, "stored"
 		}
 		x.MigrationID = strconv.FormatInt(x.migrationID, 10)
 		x.ErrorMessage = errMsg
@@ -360,19 +371,20 @@ func (s *Service) History(ctx context.Context, _ reqctx.Principal, connID uuid.U
 
 type request struct {
 	contracts.ChangeRequest
-	connID        uuid.UUID
-	migrationID   int64
-	stored        string
-	createdBy     int64
-	queuedBy      *int64
-	upSQL         string
-	downSQL       string
-	irrev         bool
-	latestRev     string
-	targetMatches bool
-	fingerprint   string
-	identity      string
-	physical      string
+	connID             uuid.UUID
+	migrationID        int64
+	stored             string
+	createdBy          int64
+	queuedBy           *int64
+	upSQL              string
+	downSQL            string
+	irrev              bool
+	latestRev          string
+	targetMatches      bool
+	invalidForwardMode bool
+	fingerprint        string
+	identity           string
+	physical           string
 }
 
 const selectRequest = `
@@ -382,6 +394,10 @@ const selectRequest = `
 	       (SELECT id::text FROM migration_revisions WHERE migration_id = q.migration_id ORDER BY number DESC LIMIT 1),
 	       q.target_fingerprint = ` + targetFingerprint + ` AND q.target_identity = ` + dbconn.IdentityFingerprint + `,
 	       q.target_fingerprint, q.target_identity, q.target_server,
+	       CASE WHEN q.action = 'forward' AND q.mode = 'normal' THEN EXISTS (
+	           SELECT 1 FROM migration_executions e JOIN jobs original ON original.id::text = e.job_id
+	           WHERE e.id = q.target_execution_id AND original.plan->>'Mode' = 'batch'
+	       ) ELSE false END,
 	       coalesce(j.id::text, ''), coalesce(j.status, ''), coalesce(j.hold, '')
 	FROM migration_requests q
 	JOIN migrations m ON m.id = q.migration_id
@@ -398,7 +414,7 @@ func scanRequest(row pgx.Row) (request, error) {
 	var jobID, jobStatus, hold string
 	err := row.Scan(&x.ID, &x.connID, &x.migrationID, &x.MigrationName, &x.RevisionID, &x.Action,
 		&x.TargetExecutionID, &x.Mode, &x.BatchSize, &x.CursorColumn, &x.Scope, &x.stored,
-		&x.createdBy, &x.queuedBy, &x.upSQL, &x.downSQL, &x.irrev, &x.latestRev, &x.targetMatches, &x.fingerprint, &x.identity, &x.physical,
+		&x.createdBy, &x.queuedBy, &x.upSQL, &x.downSQL, &x.irrev, &x.latestRev, &x.targetMatches, &x.fingerprint, &x.identity, &x.physical, &x.invalidForwardMode,
 		&jobID, &jobStatus, &hold)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return x, migration.ErrNotFound
@@ -628,12 +644,11 @@ func (s *Service) ProposeUsing(ctx context.Context, tx pgx.Tx, p reqctx.Principa
 				return migration.ValidationError("Revisi harus sama dengan revisi execution target.")
 			}
 			target = &t
-			if in.Action == "rollback" {
-				err := tx.QueryRow(ctx, `SELECT coalesce(j.plan->>'Mode',''),coalesce((j.plan->>'BatchSize')::int,0),coalesce(j.plan->>'CursorColumn',''),coalesce(j.plan->>'Scope','')
+			// Both directions use the batch configuration of the referenced attempt.
+			err = tx.QueryRow(ctx, `SELECT j.plan->>'Mode',coalesce((j.plan->>'BatchSize')::int,0),coalesce(j.plan->>'CursorColumn',''),coalesce(j.plan->>'Scope','')
       FROM migration_executions e JOIN jobs j ON j.id::text=e.job_id WHERE e.id=$1 AND j.plan->>'Mode'='batch'`, t).Scan(&in.Mode, &in.BatchSize, &in.CursorColumn, &in.Scope)
-				if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-					return err
-				}
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
 			}
 		}
 		var up, down string
@@ -845,8 +860,9 @@ func beginAttempt(ctx context.Context, q interface {
 	}
 	var id string
 	err := q.QueryRow(ctx, `
-		INSERT INTO migration_executions (connection_id, migration_id, revision_id, request_id, job_id, action, attempt, status, sql, reverts_execution_id, actor_id, target_identity,target_server)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8,$9,$10,$11,$12) RETURNING id::text`,
+		INSERT INTO migration_executions (connection_id, migration_id, revision_id, request_id, job_id, action, attempt, status, sql, reverts_execution_id, actor_id, target_identity,target_server,sql_dispatch_tracked)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8,$9,$10,$11,$12,
+		        (SELECT dbms = 'postgresql' FROM db_connections WHERE id = $1)) RETURNING id::text`,
 		pl.ConnectionID, pl.MigrationID, pl.RevisionID, pl.RequestID, jobID, pl.Action, attemptNo, pl.SQL, reverts, pl.ActorID, pl.TargetIdentity, pl.TargetServer).Scan(&id)
 	return id, err
 }

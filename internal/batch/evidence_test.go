@@ -2,6 +2,8 @@ package batch
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"errors"
 	"strings"
 	"testing"
@@ -43,6 +45,49 @@ func TestSealedEvidenceRunResumeAndCompensate(t *testing.T) {
 	}
 	if b := balances(t, r.Pool); b[100] != rows {
 		t.Fatalf("semua baris harus kembali: %v", b)
+	}
+}
+
+func TestResumeWithLegacySeal(t *testing.T) {
+	r, exec := sealedRunner(t, "ev_legacy")
+	ctx := context.Background()
+	sp := batchSpec(1, OpUp, upSQL)
+	sp.Binding = "identity:server:nonce"
+	r.Hooks.BeforeCommit = func(_ string, n int) error {
+		if n == 3 {
+			return errors.New("stop before batch 3")
+		}
+		return nil
+	}
+	if progress, err := r.Run(ctx, sp, nil); err == nil || progress.Batches != 2 {
+		t.Fatalf("expected two committed batches: %+v, %v", progress, err)
+	}
+	r.Hooks = Hooks{}
+
+	var state string
+	if err := r.Pool.QueryRow(ctx, `SELECT jsonb_build_array(
+    (SELECT jsonb_build_array(scope_max,total_rows,finished_at IS NOT NULL)
+       FROM _platform.migration_runs WHERE root_job=1 AND op='up'),
+    (SELECT jsonb_agg(jsonb_build_array(batch_no,cursor_from,cursor_to,rows_affected,row_manifest) ORDER BY batch_no)
+       FROM _platform.migration_checkpoints WHERE root_job=1 AND op='up'))::text`).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	mac := hmac.New(sha256.New, testKey)
+	mac.Write([]byte(strings.Join([]string{"pg-v1", sp.Binding, "1", OpUp, state}, "\x00")))
+	exec(`UPDATE _platform.migration_seals SET proof=$1 WHERE root_job=1 AND op='up'`, mac.Sum(nil))
+
+	if progress, done, err := r.Evidence(ctx, sp); err != nil || done || progress.Batches != 2 {
+		t.Fatalf("expected legacy evidence to verify: %+v, %v, %v", progress, done, err)
+	}
+	if progress, err := r.Run(ctx, sp, nil); err != nil || progress.Batches != 10 || progress.Rows != rows {
+		t.Fatalf("expected resume from legacy evidence: %+v, %v", progress, err)
+	}
+	var proof []byte
+	if err := r.Pool.QueryRow(ctx, `SELECT proof FROM _platform.migration_seals WHERE root_job=1 AND op='up'`).Scan(&proof); err != nil {
+		t.Fatal(err)
+	}
+	if len(proof) != sha256.Size+1 || proof[0] != proofV2 || balances(t, r.Pool)[101] != rows {
+		t.Fatal("resume must write new evidence and update each row once")
 	}
 }
 

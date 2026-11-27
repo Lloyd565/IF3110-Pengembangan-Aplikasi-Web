@@ -142,8 +142,14 @@ func (s *Service) recover(ctx context.Context, p reqctx.Principal, j *Job, actio
 		if active {
 			return contracts.ChangeRequest{}, apiErr(409, "conflict", "Sudah ada job lanjutan yang sedang berjalan.")
 		}
+		// The original request still supplies the approved SQL. The new job belongs to the resumer.
+		plan.ActorID = p.UserID
+		resumePlan, err := json.Marshal(plan)
+		if err != nil {
+			return contracts.ChangeRequest{}, err
+		}
 		if _, _, err := Enqueue(ctx, tx, NewJob{ConnectionID: connID, RequestID: j.RequestID, Kind: KindResume, ParentJobID: &j.ID,
-			Key: "resume:" + id + ":" + key, Plan: j.Plan, TraceCtx: InjectTrace(ctx)}); err != nil {
+			Key: "resume:" + id + ":" + key, Plan: resumePlan, TraceCtx: InjectTrace(ctx)}); err != nil {
 			return contracts.ChangeRequest{}, err
 		}
 		return flow.RequestTx(ctx, tx, p, connID, j.RequestID.String())

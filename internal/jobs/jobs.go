@@ -245,6 +245,13 @@ func MarkDispatched(ctx context.Context, q Querier, id int64, worker string) err
 	return fenced(ctx, q, `UPDATE jobs SET dispatch_ready=true,updated_at=now()`+mine, id, worker)
 }
 
+// RecordExecutionSQL snapshots the SQL sent to the target while the worker still owns the attempt.
+func RecordExecutionSQL(ctx context.Context, q Querier, id int64, worker, executionID, sql string) error {
+	return fenced(ctx, q, `UPDATE migration_executions e SET executed_sql = $4
+		FROM (SELECT execution_id FROM jobs`+mine+` AND attempt_open AND dispatch_ready FOR UPDATE) active
+		WHERE e.id = active.execution_id AND e.id = $3::uuid AND e.executed_sql IS NULL`, id, worker, executionID, sql)
+}
+
 func CloseAttempt(ctx context.Context, q Querier, id int64, worker string) error {
 	return fenced(ctx, q, `UPDATE jobs SET attempt_open = false, updated_at = now()`+mine, id, worker)
 }

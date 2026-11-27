@@ -32,6 +32,7 @@ type Info struct {
 	Database      string
 	CorrelationID string
 	MigrationID   string
+	RevisionID    string
 	RequestID     string
 	ExecutionID   string
 	JobID         int64
@@ -71,6 +72,9 @@ func (i Info) attrs() []slog.Attr {
 	}
 	if i.MigrationID != "" {
 		a = append(a, slog.String("migration_id", i.MigrationID))
+	}
+	if i.RevisionID != "" {
+		a = append(a, slog.String("revision_id", i.RevisionID))
 	}
 	if i.RequestID != "" {
 		a = append(a, slog.String("request_id", i.RequestID))

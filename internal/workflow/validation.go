@@ -15,6 +15,9 @@ import (
 )
 
 func validateBatchRequest(x request) error {
+	if x.invalidForwardMode {
+		return migration.ValidationError("Pengajuan forward ini memakai mode normal untuk eksekusi batch. Ajukan forward baru dari riwayat.")
+	}
 	if x.Mode == "normal" {
 		return nil
 	}
@@ -43,6 +46,9 @@ func validateBatchRequest(x request) error {
 }
 
 func (s *Service) validateTarget(ctx context.Context, q querier, connID uuid.UUID, x *request, inspectTarget bool) error {
+	if x.invalidForwardMode {
+		return validateBatchRequest(*x)
+	}
 	if strings.TrimSpace(x.SQL) != "" {
 		if err := migration.CheckSQL(ctx, q, connID, x.SQL); err != nil {
 			return err

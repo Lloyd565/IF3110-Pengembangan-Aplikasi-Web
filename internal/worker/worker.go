@@ -39,11 +39,11 @@ type Flow interface {
 // Recoverer opsional: revalidasi untuk resume. Pengajuan semula tetap harus approved, tetapi
 // penahan posisi (partial/commit_unknown) justru yang sedang dipulihkan, jadi tidak ikut diperiksa.
 type Recoverer interface {
-	PrepareRecovery(ctx context.Context, requestID string) (workflow.Plan, error)
+	PrepareRecovery(ctx context.Context, requestID string, resumeActorID int64) (workflow.Plan, error)
 }
 
 type Revalidator interface {
-	Revalidate(ctx context.Context, requestID string, recovery bool) error
+	Revalidate(ctx context.Context, requestID string, recovery bool, resumeActorID int64) error
 }
 
 type Targets interface {
@@ -170,7 +170,7 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 		return
 	}
 	info := telemetry.Info{Actor: strconv.FormatInt(snap.ActorID, 10), Database: j.ConnectionID.String(), CorrelationID: j.RequestID.String(),
-		MigrationID: snap.MigrationID, RequestID: j.RequestID.String(), JobID: j.ID, Attempt: j.Attempt + 1, Op: snap.Action}
+		MigrationID: snap.MigrationID, RevisionID: snap.RevisionID, RequestID: j.RequestID.String(), JobID: j.ID, Attempt: j.Attempt + 1, Op: snap.Action}
 	ctx = telemetry.With(ctx, info)
 	if w.Metrics != nil && j.RetryCount == 0 {
 		w.Metrics.QueueWait(time.Since(j.QueuedAt))
@@ -204,6 +204,9 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 	}()
 
 	if j.AttemptOpen && j.ExecutionID != "" {
+		recovered := info
+		recovered.ExecutionID, recovered.Attempt = j.ExecutionID, j.Attempt
+		ctx = telemetry.With(ctx, recovered)
 		if r, ok := w.Flow.(interface {
 			AttemptStatus(context.Context, string, workflow.Plan) (string, error)
 		}); ok {
@@ -259,11 +262,16 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 		}
 	}
 
+	ctx = telemetry.With(ctx, info)
 	if j.RetryCount > j.MaxRetries {
 		_ = jobs.Fail(ctx, w.DB, j.ID, w.ID, j.Hold, "Batas percobaan worker tercapai.")
 		return
 	}
-	plan, err := w.prepare(ctx, j)
+	var resumeActorID int64
+	if j.Kind == jobs.KindResume {
+		resumeActorID = snap.ActorID
+	}
+	plan, err := w.prepare(ctx, j, resumeActorID)
 	plan.EvidenceNonce = snap.EvidenceNonce
 	if err == nil && snap.TargetIdentity != "" && plan != snap {
 		err = &contracts.Error{Status: 409, Message: "Rencana eksekusi tidak sama dengan pengajuan pada queue."}
@@ -277,6 +285,7 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 		return
 	}
 	info.Op, info.MigrationID, info.Actor = plan.Action, plan.MigrationID, strconv.FormatInt(plan.ActorID, 10)
+	info.RevisionID = plan.RevisionID
 
 	attemptNo := j.Attempt + 1
 	exec, err := w.beginAttempt(ctx, j, plan, attemptNo)
@@ -288,7 +297,7 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 	info.ExecutionID, info.Attempt = exec, attemptNo
 	ctx = telemetry.With(ctx, info)
 
-	prog, runErr := w.execute(ctx, j, plan, &lost, cancel)
+	prog, runErr := w.execute(ctx, j, plan, resumeActorID, &lost, cancel)
 	if lost.Load() {
 		telemetry.Event(ctx, slog.LevelWarn, "job.lease_lost", "abandoned")
 		return
@@ -296,13 +305,13 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 	w.finish(ctx, j, exec, prog, runErr, started, &lost)
 }
 
-func (w *Worker) prepare(ctx context.Context, j *jobs.Job) (workflow.Plan, error) {
+func (w *Worker) prepare(ctx context.Context, j *jobs.Job, resumeActorID int64) (workflow.Plan, error) {
 	// Job yang membawa hold (partial, commit_unknown, partially_reverted) sedang memulihkan keadaan yang
 	// ia tinggalkan sendiri; penahan itu tidak boleh menolaknya. Job tanpa hold tetap diperiksa penuh
 	// terhadap posisi database, sehingga urutan linear terjaga.
 	if j.Kind == jobs.KindResume || j.Hold != jobs.HoldNone {
 		if r, ok := w.Flow.(Recoverer); ok {
-			return r.PrepareRecovery(ctx, j.RequestID.String())
+			return r.PrepareRecovery(ctx, j.RequestID.String(), resumeActorID)
 		}
 	}
 	return w.Flow.Prepare(ctx, j.RequestID.String())
@@ -330,7 +339,7 @@ func spec(j *jobs.Job, p workflow.Plan) batch.Spec {
 	return sp
 }
 
-func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, lost *atomic.Bool, cancel context.CancelFunc) (batch.Progress, error) {
+func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, resumeActorID int64, lost *atomic.Bool, cancel context.CancelFunc) (batch.Progress, error) {
 	prog := batch.Progress{Batches: j.CommittedBatches, Rows: j.CommittedRows, Total: j.TotalRows}
 	if err := w.checkJobPosition(ctx, j, plan); err != nil {
 		return prog, err
@@ -338,6 +347,16 @@ func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, l
 	tgt, err := w.verifiedTarget(ctx, j, plan, false)
 	if err != nil {
 		return prog, err
+	}
+	var revalidate func(context.Context) error
+	if f, ok := w.Flow.(Revalidator); ok {
+		revalidate = func(ctx context.Context) error {
+			if err := w.checkJobPosition(ctx, j, plan); err != nil {
+				return err
+			}
+			recovery := j.Kind != jobs.KindRun || j.Hold != jobs.HoldNone
+			return f.Revalidate(ctx, j.RequestID.String(), recovery, resumeActorID)
+		}
 	}
 	if tgt.DBMS == dbconn.MariaDB && tgt.Maria != nil {
 		if plan.Mode == "batch" {
@@ -355,28 +374,17 @@ func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, l
 				return p, batch.ErrCommitUnknown
 			}
 		}
-		revalidate := func(ctx context.Context) error {
-			if f, ok := w.Flow.(Revalidator); ok {
-				if err := w.checkJobPosition(ctx, j, plan); err != nil {
-					return err
-				}
-				return f.Revalidate(ctx, j.RequestID.String(), j.Kind != jobs.KindRun || j.Hold != jobs.HoldNone)
-			}
-			return nil
-		}
 		return migration.RunWorkflowMaria(ctx, tgt, j.RootID, spec(j, plan).Op, plan.SQL, revalidate, func(ctx context.Context) error { return jobs.MarkDispatched(ctx, w.DB, j.ID, w.ID) }, spec(j, plan).Binding, plan.TargetServer)
 	}
 	if tgt.DBMS != dbconn.PostgreSQL || tgt.Postgres == nil {
 		return prog, errUnsupportedTarget
 	}
 	r := &batch.Runner{Pool: tgt.Postgres, LockWait: w.LockWait, StatementTimeout: w.StatementTimeout, Hooks: w.Hooks, ReconcileWait: w.ReconcileWait, EvidenceKey: tgt.EvidenceKey, TargetServer: plan.TargetServer,
-		Arm: func(ctx context.Context) error { return jobs.MarkDispatched(ctx, w.DB, j.ID, w.ID) }}
-	if f, ok := w.Flow.(Revalidator); ok {
-		r.Revalidate = func(ctx context.Context) error {
-			if err := w.checkJobPosition(ctx, j, plan); err != nil {
-				return err
-			}
-			return f.Revalidate(ctx, j.RequestID.String(), j.Kind != jobs.KindRun || j.Hold != jobs.HoldNone)
+		Revalidate: revalidate,
+		Arm:        func(ctx context.Context) error { return jobs.MarkDispatched(ctx, w.DB, j.ID, w.ID) }}
+	if _, ok := w.Flow.(atomicFlow); ok {
+		r.RecordSQL = func(ctx context.Context, sql string) error {
+			return jobs.RecordExecutionSQL(ctx, w.DB, j.ID, w.ID, telemetry.From(ctx).ExecutionID, sql)
 		}
 	}
 	if w.Metrics != nil {
@@ -537,7 +545,9 @@ func (w *Worker) reject(ctx context.Context, j *jobs.Job, snap workflow.Plan, ca
 		return
 	}
 	if err := w.completeAttempt(fctx, j, exec, status, msg, func(q jobs.Querier) error { return jobs.Fail(fctx, q, j.ID, w.ID, hold, msg) }); err == nil && !lost.Load() {
-		telemetry.Event(ctx, slog.LevelWarn, "job.rejected", "failed")
+		info := telemetry.From(ctx)
+		info.ExecutionID, info.Attempt = exec, attemptNo
+		telemetry.Event(telemetry.With(ctx, info), slog.LevelWarn, "job.rejected", "failed")
 	}
 
 }

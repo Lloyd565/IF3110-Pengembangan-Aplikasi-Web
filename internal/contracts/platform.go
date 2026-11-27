@@ -88,6 +88,8 @@ type Execution struct {
 	Actor              string    `json:"actor"`
 	At                 time.Time `json:"at"`
 	SQL                string    `json:"sql"`
+	SQLSource          string    `json:"sql_source"`
+	PlannedSQL         string    `json:"planned_sql,omitempty"`
 	Attempt            int       `json:"attempt"`
 	RevertsExecutionID string    `json:"reverts_execution_id,omitempty"`
 	ErrorMessage       string    `json:"error_message,omitempty"`

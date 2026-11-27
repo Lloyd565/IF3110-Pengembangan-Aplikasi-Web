@@ -64,6 +64,7 @@ type Runner struct {
 	ReconcileWait    time.Duration // batas membaca bukti di target setelah jawaban commit hilang
 	Revalidate       func(context.Context) error
 	Arm              func(context.Context) error
+	RecordSQL        func(context.Context, string) error // records user SQL once, just before dispatch
 	EvidenceKey      []byte
 	TargetServer     string
 }
@@ -227,6 +228,7 @@ func table(name string) (string, error) {
 }
 
 type queryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
 	QueryRow(context.Context, string, ...any) pgx.Row
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }
@@ -289,6 +291,9 @@ func totals(ctx context.Context, q queryer, sp Spec, r run) (Progress, error) {
 		WHERE root_job = $1 AND op = $2`, sp.RootID, sp.Op).Scan(&p.Batches, &p.Rows)
 	if err == nil && sp.Size == 0 && r.finished && r.total != nil {
 		p.Batches, p.Rows = 1, *r.total
+	}
+	if err == nil && r.finished {
+		p.Total = &p.Rows
 	}
 	return p, err
 }
@@ -472,6 +477,11 @@ func (r *Runner) runNormal(ctx context.Context, s *session, sp Spec) (Progress, 
 	if err != nil {
 		return Progress{}, err
 	}
+	if r.RecordSQL != nil {
+		if err := r.RecordSQL(ctx, sp.SQL); err != nil {
+			return Progress{}, err
+		}
+	}
 	tag, err := tx.Exec(ctx, sp.SQL)
 	if err == nil {
 		err = r.checkControl(ctx, tx, control)
@@ -533,6 +543,7 @@ func (r *Runner) runBatches(ctx context.Context, s *session, sp Spec, rn run, re
 		return prog, fmt.Errorf("%w: run %s tidak punya cakupan batch", ErrInvalidSpec, sp.Op)
 	}
 	next := fmt.Sprintf(`SELECT max(c) FROM (SELECT %s AS c FROM %s WHERE %s > $1 AND %s <= $2 ORDER BY %s LIMIT $3) s`, col, tbl, col, col, col)
+	recordSQL := r.RecordSQL
 	for {
 		if err := ctx.Err(); err != nil {
 			return prog, err
@@ -580,6 +591,14 @@ func (r *Runner) runBatches(ctx context.Context, s *session, sp Spec, rn run, re
 			span.End()
 			return prog, err
 		}
+		if recordSQL != nil {
+			if err := recordSQL(bctx, replaySQL); err != nil {
+				tx.Rollback(context.WithoutCancel(bctx))
+				span.End()
+				return prog, err
+			}
+			recordSQL = nil
+		}
 		var affected int64
 		var manifest *rowManifest
 		if trackRows {
@@ -589,7 +608,7 @@ func (r *Runner) runBatches(ctx context.Context, s *session, sp Spec, rn run, re
 			affected = int64(len(captured.Rows))
 		} else {
 			var tag pgconn.CommandTag
-			tag, err = tx.Exec(bctx, sp.SQL, last, *upper)
+			tag, err = tx.Exec(bctx, replaySQL, last, *upper)
 			affected = tag.RowsAffected()
 		}
 		if err == nil {
@@ -630,13 +649,8 @@ func (r *Runner) runBatches(ctx context.Context, s *session, sp Spec, rn run, re
 		WHERE root_job = $1 AND op = $2 AND finished_at IS NULL`, sp.RootID, sp.Op); err != nil {
 		return prog, err
 	}
+	prog.Total = &prog.Rows
 	return prog, nil
-}
-
-type span struct {
-	no       int
-	from, to int64
-	manifest *rowManifest
 }
 
 // Compensate membatalkan batch up yang sudah committed memakai SQL down, dalam urutan batch terbalik.
@@ -690,20 +704,6 @@ func (r *Runner) Compensate(ctx context.Context, sp Spec, report func(Progress))
 	if !upRun.exists {
 		return Progress{}, fmt.Errorf("%w: tidak ada bukti eksekusi up untuk dibatalkan", ErrUnsafe)
 	}
-	rows, err := s.conn.Query(ctx, `SELECT u.batch_no, u.cursor_from, u.cursor_to,u.row_manifest FROM _platform.migration_checkpoints u
-		WHERE u.root_job = $1 AND u.op = 'up' AND NOT EXISTS (SELECT 1 FROM _platform.migration_checkpoints d
-			WHERE d.root_job = u.root_job AND d.op = 'down' AND d.batch_no = u.batch_no)
-		ORDER BY u.batch_no DESC`, sp.RootID)
-	if err != nil {
-		return Progress{}, err
-	}
-	pending, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (span, error) {
-		var x span
-		return x, r.Scan(&x.no, &x.from, &x.to, &x.manifest)
-	})
-	if err != nil {
-		return Progress{}, err
-	}
 	var upBatches, upRows int64
 	if err := s.conn.QueryRow(ctx, `SELECT count(*), coalesce(sum(rows_affected), 0) FROM _platform.migration_checkpoints WHERE root_job = $1 AND op = 'up'`,
 		sp.RootID).Scan(&upBatches, &upRows); err != nil {
@@ -727,56 +727,77 @@ func (r *Runner) Compensate(ctx context.Context, sp Spec, report func(Progress))
 	if err != nil || !tracked {
 		return prog, ErrUnsafe
 	}
-	for _, b := range pending {
+	tbl, _ := table(sp.Table)
+	recordSQL := r.RecordSQL
+	before := int64(math.MaxInt64)
+	for {
+		var no int
+		var from, to int64
+		var manifest *rowManifest
+		err := s.conn.QueryRow(ctx, `SELECT u.batch_no, u.cursor_from, u.cursor_to, u.row_manifest FROM _platform.migration_checkpoints u
+			WHERE u.root_job = $1 AND u.op = 'up' AND u.batch_no < $2::bigint AND NOT EXISTS (SELECT 1 FROM _platform.migration_checkpoints d
+				WHERE d.root_job = u.root_job AND d.op = 'down' AND d.batch_no = u.batch_no)
+			ORDER BY u.batch_no DESC LIMIT 1`, sp.RootID, before).Scan(&no, &from, &to, &manifest)
+		if errors.Is(err, pgx.ErrNoRows) {
+			break
+		}
+		if err != nil {
+			return prog, err
+		}
+		bctx := telemetry.WithBatch(ctx, no)
 		if r.Revalidate != nil {
-			if err := r.Revalidate(ctx); err != nil {
+			if err := r.Revalidate(bctx); err != nil {
 				return prog, err
 			}
 		}
-		if err := ctx.Err(); err != nil {
-			return prog, err
-		}
-		tx, err := r.begin(ctx, s)
+		tx, err := r.begin(bctx, s)
 		if err != nil {
 			return prog, err
 		}
-		tbl, _ := table(sp.Table)
-		if _, err := tx.Exec(ctx, "LOCK TABLE "+tbl+" IN SHARE ROW EXCLUSIVE MODE"); err != nil {
+		if _, err := tx.Exec(bctx, "LOCK TABLE "+tbl+" IN SHARE ROW EXCLUSIVE MODE"); err != nil {
 			tx.Rollback(context.WithoutCancel(ctx))
 			return prog, err
 		}
-		if err := validateCursor(ctx, tx, sp); err != nil {
+		if err := validateCursor(bctx, tx, sp); err != nil {
 			tx.Rollback(context.WithoutCancel(ctx))
 			return prog, err
 		}
-		ids, err := matchingRows(ctx, tx, sp, tbl, b.manifest)
+		ids, err := matchingRows(bctx, tx, sp, tbl, manifest)
 		if err != nil {
 			tx.Rollback(context.WithoutCancel(ctx))
 			return prog, err
 		}
-		control, err := r.controlState(ctx, tx)
+		control, err := r.controlState(bctx, tx)
 		if err != nil {
 			tx.Rollback(context.WithoutCancel(ctx))
 			return prog, err
 		}
-		tag, err := tx.Exec(ctx, downSQL, b.from, b.to, ids)
+		if recordSQL != nil {
+			if err := recordSQL(bctx, downSQL); err != nil {
+				tx.Rollback(context.WithoutCancel(ctx))
+				return prog, err
+			}
+			recordSQL = nil
+		}
+		tag, err := tx.Exec(bctx, downSQL, from, to, ids)
 		if err == nil {
-			err = r.checkControl(ctx, tx, control)
+			err = r.checkControl(bctx, tx, control)
 		}
 		if err == nil && tag.RowsAffected() != int64(len(ids)) {
 			err = ErrUnsafe
 		}
 		if err == nil {
-			_, err = tx.Exec(ctx, `INSERT INTO _platform.migration_checkpoints (root_job, op, batch_no, cursor_from, cursor_to, rows_affected)
-				VALUES ($1, 'down', $2, $3, $4, $5)`, sp.RootID, b.no, b.from, b.to, tag.RowsAffected())
+			_, err = tx.Exec(bctx, `INSERT INTO _platform.migration_checkpoints (root_job, op, batch_no, cursor_from, cursor_to, rows_affected)
+				VALUES ($1, 'down', $2, $3, $4, $5)`, sp.RootID, no, from, to, tag.RowsAffected())
 		}
 		if err != nil {
 			tx.Rollback(context.WithoutCancel(ctx))
 			return prog, err
 		}
-		if err := r.commit(ctx, s, tx, sp, b.no); err != nil {
+		if err := r.commit(bctx, s, tx, sp, no); err != nil {
 			return prog, err
 		}
+		before = int64(no)
 		prog.Batches++
 		prog.Rows += tag.RowsAffected()
 		if report != nil {
