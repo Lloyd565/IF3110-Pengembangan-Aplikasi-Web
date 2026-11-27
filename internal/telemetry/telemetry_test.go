@@ -296,7 +296,7 @@ func TestMetricsExposeQueueAndJobCounts(t *testing.T) {
 			t.Errorf("%s = %v (ada=%v), mau %v", key, got, ok, want)
 		}
 	}
-	// label dibatasi: job ID, user ID, dan SQL tidak boleh menjadi label.
+
 	for key := range byName {
 		if strings.Contains(key, "job_id") || strings.Contains(key, "user") || strings.Contains(key, "sql") {
 			t.Errorf("label berkardinalitas tinggi: %s", key)

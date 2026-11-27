@@ -173,7 +173,6 @@ func TestAdminAccessFlow(t *testing.T) {
 	e := admSetup(t)
 	ctx := context.Background()
 
-	// koneksi dibuat lewat halaman; password tidak boleh muncul lagi di mana pun
 	form := url.Values{"action": {"create"}, "name": {"DB-A"}, "host": {"127.0.0.1"}, "port": {"5432"},
 		"dbname": {"d"}, "username": {"u"}, "password": {"rahasia-koneksi-123"}, "sslmode": {"disable"}}
 	if rr := e.asAdmin(e.srv.adminConnections, "POST", "/admin/connections", form); rr.Code != http.StatusSeeOther {
@@ -203,7 +202,6 @@ func TestAdminAccessFlow(t *testing.T) {
 		t.Errorf("test connection ke target mati: %d", rr.Code)
 	}
 
-	// group + anggota + grant lewat halaman
 	if rr := e.asAdmin(e.srv.adminGroups, "POST", "/admin/groups", url.Values{"action": {"create"}, "name": {"tim"}}); rr.Code != http.StatusSeeOther {
 		t.Fatalf("buat group: %d", rr.Code)
 	}
@@ -240,14 +238,12 @@ func TestAdminAccessFlow(t *testing.T) {
 		t.Errorf("level tidak valid: %d", rr.Code)
 	}
 
-	// hapus koneksi
 	del := e.asAdmin(e.srv.adminConnections, "POST", "/admin/connections", url.Values{"action": {"delete"}, "id": {connID}})
 	if del.Code != http.StatusSeeOther || strings.Contains(admBody(e.asAdmin(e.srv.adminConnections, "GET", "/admin/connections", nil)), "DB-A") {
 		t.Error("koneksi terhapus tidak boleh tampil lagi")
 	}
 }
 
-// Penolakan akses pada halaman database: ini yang diuji dosen (bukan sekadar sembunyi tombol).
 func TestDatabaseAccessDenied(t *testing.T) {
 	e := admSetup(t)
 	ctx := context.Background()
@@ -267,7 +263,6 @@ func TestDatabaseAccessDenied(t *testing.T) {
 	newMig := url.Values{"name": {"tambah tabel"}, "sql": {"CREATE TABLE t (id int)"}}
 	id := conn.String()
 
-	// View Only: boleh melihat riwayat, ditolak menulis
 	if rr := e.call(e.srv.migrationList, "GET", "/db/"+id+"/migrations", nil, admPrincipal(viewer, false), id); rr.Code != http.StatusOK {
 		t.Errorf("view only melihat riwayat: %d", rr.Code)
 	}
@@ -278,7 +273,6 @@ func TestDatabaseAccessDenied(t *testing.T) {
 		t.Errorf("view only membuka editor harus 403, dapat %d", rr.Code)
 	}
 
-	// View + Edit: boleh membuat draft
 	rr := e.call(e.srv.migrationCreate, "POST", "/db/"+id+"/migrations/new", newMig, admPrincipal(editor, false), id)
 	if rr.Code != http.StatusSeeOther {
 		t.Fatalf("view+edit membuat migration: %d %s", rr.Code, admBody(rr))
@@ -300,7 +294,6 @@ func TestDatabaseAccessDenied(t *testing.T) {
 		t.Errorf("migration harus tetap draft, dapat %q (err %v)", status, err)
 	}
 
-	// Tanpa grant, dan Platform Admin tanpa grant: ditolak walau bisa membuka halaman admin
 	for name, p := range map[string]*reqctx.Principal{"tanpa grant": admPrincipal(outsider, false), "admin tanpa grant": admPrincipal(e.root, true)} {
 		for label, h := range map[string]http.HandlerFunc{"riwayat": e.srv.migrationList, "schema": e.srv.dbSchema} {
 			if rr := e.call(h, "GET", "/db/"+id, nil, p, id); rr.Code != http.StatusForbidden {

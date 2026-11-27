@@ -21,8 +21,7 @@ type position struct {
 	applied map[int64]string
 	rolled  map[int64]string
 	blocked string
-	// blockedID/blockedStatus: execution yang menahan database. Rollback yang menargetkan execution
-	// partial ini adalah kompensasi untuk memulihkannya, jadi tidak ikut ditahan.
+
 	blockedID, blockedStatus string
 }
 

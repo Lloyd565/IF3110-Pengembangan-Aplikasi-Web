@@ -79,8 +79,6 @@ func (r *Repo) SetPasswordHash(ctx context.Context, id int64, hash string) error
 	return r.update(ctx, `UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1`, id, hash)
 }
 
-// EnsureAdmin: bootstrap admin pertama. Hanya membuat akun jika belum ada
-// satu pun platform admin; kalau sudah ada, tidak melakukan apa-apa.
 func (r *Repo) EnsureAdmin(ctx context.Context, username, passwordHash string) (created bool, err error) {
 	tag, err := r.DB.Exec(ctx, `
 		INSERT INTO users (username, password_hash, is_platform_admin)

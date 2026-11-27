@@ -14,8 +14,6 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/workflow"
 )
 
-// Queue memenuhi workflow.Queue: enqueue berjalan di transaksi platform milik workflow,
-// jadi perubahan status pengajuan dan pembuatan job tidak bisa terpisah.
 type Queue struct{ MaxRetries int }
 
 var _ workflow.Queue = Queue{}
@@ -25,8 +23,7 @@ func (q Queue) Enqueue(ctx context.Context, tx pgx.Tx, plan workflow.Plan, key s
 	if err != nil {
 		return contracts.Job{}, &contracts.Error{Status: 422, Code: "invalid_request", Message: "ID pengajuan tidak valid."}
 	}
-	// Rollback yang menargetkan execution partial/partially_reverted adalah kompensasi atas job tersebut:
-	// ia memakai root yang sama supaya checkpoint di target tidak tertukar.
+
 	kind, parent := KindRun, (*int64)(nil)
 	if plan.Action == "rollback" && plan.TargetExecutionID != "" {
 		var jid *string
@@ -41,7 +38,7 @@ func (q Queue) Enqueue(ctx context.Context, tx pgx.Tx, plan workflow.Plan, key s
 			}
 		}
 	}
-	// Satu pengajuan hanya boleh punya satu job utama, berapa pun kunci idempotensi yang dikirim.
+
 	var existing int64
 	err = tx.QueryRow(ctx, `SELECT id FROM jobs WHERE request_id = $1 AND kind <> 'resume' ORDER BY id LIMIT 1`, rid).Scan(&existing)
 	if err != nil && err != pgx.ErrNoRows {
@@ -83,7 +80,6 @@ func (q Queue) Enqueue(ctx context.Context, tx pgx.Tx, plan workflow.Plan, key s
 	return Public(j), nil
 }
 
-// Public mengubah baris job menjadi DTO kontrak untuk API/SPA.
 func Public(j *Job) contracts.Job {
 	var plan workflow.Plan
 	_ = json.Unmarshal(j.Plan, &plan)
@@ -96,17 +92,15 @@ func Public(j *Job) contracts.Job {
 		MigrationID: plan.MigrationID, ExecutionID: j.ExecutionID, Status: j.PublicStatus(),
 		CommittedRows: j.CommittedRows, CommittedBatches: j.CommittedBatches, TotalRows: total,
 		Attempt: j.Attempt, LastError: j.Error,
-		// commit_unknown dipulihkan lewat resume: worker membaca bukti di target lebih dulu, baru melanjutkan.
+
 		CanResume: j.Status == StatusFailed && (j.Hold == HoldPartial || j.Hold == HoldCommitUnknown) && j.Kind != KindCompensate,
-		// Kompensasi yang tertahan commit_unknown dilanjutkan dengan kompensasi lagi: setiap batch down
-		// diperiksa dari checkpoint di target dulu, jadi batch yang ternyata committed tidak diulang.
+
 		CanCompensate: j.Status == StatusFailed && (j.Hold == HoldPartial || j.Hold == HoldPartiallyReverted ||
 			(j.Hold == HoldCommitUnknown && j.Kind == KindCompensate)),
 		UpdatedAt: j.UpdatedAt,
 	}
 }
 
-// InjectTrace menyimpan W3C trace context (traceparent/tracestate) untuk disambung oleh worker.
 func InjectTrace(ctx context.Context) string {
 	carrier := propagation.MapCarrier{}
 	otel.GetTextMapPropagator().Inject(ctx, carrier)
@@ -117,7 +111,6 @@ func InjectTrace(ctx context.Context) string {
 	return string(b)
 }
 
-// ExtractTrace memulihkan trace context dari job; context kosong jika tidak ada.
 func ExtractTrace(ctx context.Context, stored string) context.Context {
 	if stored == "" {
 		return ctx

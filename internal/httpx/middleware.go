@@ -101,7 +101,7 @@ func sameOrigin(r *http.Request, publicOrigin string) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return true
-	} // Synchronizer/signed double-submit token is still mandatory.
+	}
 	u, err := url.Parse(origin)
 	scheme := "http"
 	if r.TLS != nil {
@@ -213,7 +213,7 @@ func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recover() != nil {
-				// Panic values may contain secrets supplied to a downstream component.
+
 				log.Print("http: request panic recovered")
 				s.renderError(w, r, http.StatusInternalServerError, "Terjadi kesalahan pada server.")
 			}
@@ -273,7 +273,7 @@ func requestLogging(next http.Handler) http.Handler {
 					code = http.StatusInternalServerError
 				}
 			}
-			// Do not log URL/path/query/body/headers: any can contain submitted secrets.
+
 			log.Printf("http method=%q status=%d duration=%s", r.Method, code, time.Since(start).Round(time.Millisecond))
 		}()
 		next.ServeHTTP(status, r)

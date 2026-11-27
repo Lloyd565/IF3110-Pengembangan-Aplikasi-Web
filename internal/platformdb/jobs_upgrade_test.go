@@ -7,15 +7,13 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/testdb"
 )
 
-// Database yang sudah pernah menjalankan 0004 versi awal (yang sempat dipublikasikan) harus ikut
-// ter-upgrade ke skema jobs yang baru lewat 0005, tanpa mengedit migration yang sudah terbit.
 func TestJobsSchemaUpgradesFromPublishedVersion(t *testing.T) {
 	db := testdb.Fresh(t, "jobs_upgrade")
 	ctx := context.Background()
 	if err := Migrate(ctx, db); err != nil {
 		t.Fatal(err)
 	}
-	// kembalikan ke keadaan mesin lama: tabel jobs hasil 0004 asli, 0005 belum tercatat.
+
 	old, err := migrationFiles.ReadFile("migrations/0004_jobs.sql")
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +42,7 @@ func TestJobsSchemaUpgradesFromPublishedVersion(t *testing.T) {
 	if !gone {
 		t.Error("kolom skema lama harus hilang")
 	}
-	// migrasi ulang idempoten.
+
 	if err := Migrate(ctx, db); err != nil {
 		t.Fatalf("migrasi kedua harus no-op: %v", err)
 	}

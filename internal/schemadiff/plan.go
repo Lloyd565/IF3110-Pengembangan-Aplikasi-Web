@@ -132,8 +132,7 @@ func Compare(current, desired Snapshot) (Plan, error) {
 			p.step("Hapus tabel "+name, "DROP TABLE "+qualified(kind, current.Schema, name))
 		}
 	}
-	// Existing MariaDB tables use one combined ALTER so auto_increment never
-	// temporarily loses its required key between separate DDL statements.
+
 	for _, name := range all {
 		a, had := old[name]
 		b, want := next[name]

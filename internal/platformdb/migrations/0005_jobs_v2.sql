@@ -1,8 +1,3 @@
--- Mengganti tabel jobs dari 0004 (satu eksekusi = satu baris dengan SQL dan parameter batch langsung)
--- dengan skema yang mengikuti kontrak workflow: request_id UUID, snapshot workflow.Plan, kind
--- run/resume/compensate, root_job_id untuk bukti di target, dan penanda attempt yang masih terbuka.
--- 0004 sengaja tidak diubah karena sudah dipublikasikan; database yang sudah menjalankannya ikut
--- ter-upgrade lewat file ini. Tabel lama tidak pernah ditulis kode produksi (hanya test), jadi aman di-drop.
 DROP TABLE IF EXISTS jobs;
 
 CREATE TABLE jobs (

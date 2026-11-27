@@ -1,6 +1,5 @@
 .PHONY: run worker test test-integration vet build db-up frontend observability-up observability-down
 
-# .env dibuat otomatis (kunci acak + admin) jika belum ada
 run: .env db-up frontend
 	go run ./cmd/server
 

@@ -1,5 +1,3 @@
--- Queue persisten untuk eksekusi migration (M2). request_id/execution_id sengaja tanpa FK:
--- tabel change_requests/executions dimiliki modul workflow dan baru disepakati lewat kontrak.
 CREATE TABLE jobs (
     id                bigserial PRIMARY KEY,
     connection_id     uuid        NOT NULL REFERENCES db_connections(id),

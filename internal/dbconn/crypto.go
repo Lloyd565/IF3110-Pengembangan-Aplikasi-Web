@@ -11,9 +11,8 @@ import (
 	"github.com/google/uuid"
 )
 
-const keyLen = 32 // AES-256
+const keyLen = 32
 
-// ParseKey membaca kunci enkripsi dari teks
 func ParseKey(s string) ([]byte, error) {
 	if s == "" {
 		return nil, errors.New("dbconn: ENCRYPTION_KEY belum diset")

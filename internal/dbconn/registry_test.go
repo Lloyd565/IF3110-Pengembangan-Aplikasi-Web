@@ -14,7 +14,6 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/testdb"
 )
 
-// targetParams: parameter koneksi ke database `dbname` di server test yang sama.
 func targetParams(t *testing.T, dbname string) Params {
 	t.Helper()
 	cfg, err := pgx.ParseConfig(os.Getenv("TEST_DATABASE_URL"))

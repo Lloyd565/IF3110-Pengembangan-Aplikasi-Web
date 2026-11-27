@@ -308,9 +308,6 @@ func TestLegacyBackfill(t *testing.T) {
 	}
 }
 
-// Upgrade 0007: execution era M1 (tanpa job worker) tetap bisa di-rollback. Execution worker yang
-// identitas targetnya kosong hanya bisa berasal dari build antara yang belum rilis; tanpa bukti
-// identitas, rollback/forward ditolak dengan jelas alih-alih menebak target.
 func TestLegacyExecutionIdentityOnUpgrade(t *testing.T) {
 	s, _, db := setup(t, "workflow_legacy_identity")
 	ctx := context.Background()
@@ -318,7 +315,7 @@ func TestLegacyExecutionIdentityOnUpgrade(t *testing.T) {
 	ap := approveAll(t, s, contracts.ChangeInput{MigrationID: m.ID, RevisionID: m.RevisionID, Action: "apply"}, alice, bob)
 	must[contracts.Job](t)(s.Enqueue(ctx, carol, conn, ap.ID, "key-legacy"))
 	e := run(t, s, ap.ID, "success")
-	// Simulasi baris sebelum 0007: identitas target kosong. Guard trigger dimatikan seperti di 0007.
+
 	legacy := func(job any) {
 		t.Helper()
 		err := pgx.BeginFunc(ctx, db, func(tx pgx.Tx) error {

@@ -1,7 +1,3 @@
-// Package worker mengambil job dari queue dan menjalankannya di Target DB. Urutan per job:
-// claim (lease) -> revalidasi izin/approval/revisi -> catat attempt -> lock target -> eksekusi
-// -> bukti commit di target -> hasil attempt di history -> status job. Worker memakai context
-// job sendiri, bukan context HTTP yang sudah selesai.
 package worker
 
 import (
@@ -29,15 +25,12 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/workflow"
 )
 
-// Flow adalah bagian workflow (milik Richard) yang dibutuhkan worker; workflow.Service memenuhinya.
 type Flow interface {
 	Prepare(ctx context.Context, requestID string) (workflow.Plan, error)
 	BeginAttempt(ctx context.Context, pl workflow.Plan, jobID string, attemptNo int) (string, error)
 	FinishAttempt(ctx context.Context, executionID, status, errMsg string) error
 }
 
-// Recoverer opsional: revalidasi untuk resume. Pengajuan semula tetap harus approved, tetapi
-// penahan posisi (partial/commit_unknown) justru yang sedang dipulihkan, jadi tidak ikut diperiksa.
 type Recoverer interface {
 	PrepareRecovery(ctx context.Context, requestID string, resumeActorID int64) (workflow.Plan, error)
 }
@@ -71,7 +64,7 @@ type Worker struct {
 
 	ReconcileWait time.Duration
 
-	Hooks   batch.Hooks // hanya untuk failure injection pada test
+	Hooks   batch.Hooks
 	Metrics Metrics
 }
 
@@ -89,7 +82,6 @@ func (w *Worker) backoff(retry int) time.Duration {
 	return min(time.Second<<min(retry, 6), time.Minute)
 }
 
-// Run memproses job sampai ctx dibatalkan (shutdown).
 func (w *Worker) Run(ctx context.Context) error {
 	poll := w.Poll
 	if poll <= 0 {
@@ -110,7 +102,6 @@ func (w *Worker) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// RunOnce mengklaim dan memproses satu job. false berarti tidak ada pekerjaan.
 func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	owner := *w
 	owner.ID = w.ID + ":" + uuid.NewString()
@@ -147,7 +138,7 @@ func classify(err error) result {
 	case batch.IsDefinite(err):
 		return permanent
 	}
-	return transient // jaringan putus dsb: bukti di target mencegah double commit, aman diulang
+	return transient
 }
 
 func (w *Worker) process(parent context.Context, j *jobs.Job) {
@@ -180,7 +171,7 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 	var lost atomic.Bool
 	stop := make(chan struct{})
 	defer close(stop)
-	hctx := ctx // salinan: ctx milik proses ditimpa di bawah, goroutine tidak boleh membacanya
+	hctx := ctx
 	go func() {
 		t := time.NewTicker(max(w.lease()/3, time.Millisecond))
 		defer t.Stop()
@@ -306,9 +297,7 @@ func (w *Worker) process(parent context.Context, j *jobs.Job) {
 }
 
 func (w *Worker) prepare(ctx context.Context, j *jobs.Job, resumeActorID int64) (workflow.Plan, error) {
-	// Job yang membawa hold (partial, commit_unknown, partially_reverted) sedang memulihkan keadaan yang
-	// ia tinggalkan sendiri; penahan itu tidak boleh menolaknya. Job tanpa hold tetap diperiksa penuh
-	// terhadap posisi database, sehingga urutan linear terjaga.
+
 	if j.Kind == jobs.KindResume || j.Hold != jobs.HoldNone {
 		if r, ok := w.Flow.(Recoverer); ok {
 			return r.PrepareRecovery(ctx, j.RequestID.String(), resumeActorID)
@@ -317,8 +306,6 @@ func (w *Worker) prepare(ctx context.Context, j *jobs.Job, resumeActorID int64) 
 	return w.Flow.Prepare(ctx, j.RequestID.String())
 }
 
-// isRevalidationRejection: approval/revisi/izin tidak lagi sah. Berbeda dari gangguan sementara
-// (database platform mati), penolakan ini tidak akan berubah jika diulang.
 func isRevalidationRejection(err error) bool {
 	var ce *contracts.Error
 	if errors.As(err, &ce) {
@@ -429,13 +416,10 @@ func (w *Worker) execute(ctx context.Context, j *jobs.Job, plan workflow.Plan, r
 	return p, err
 }
 
-// holdFor menentukan keadaan database setelah attempt tidak selesai: batch yang sudah committed
-// meninggalkan partial (atau partially_reverted pada kompensasi).
 func holdFor(j *jobs.Job, prog batch.Progress, err error) (hold, attemptStatus string) {
 	switch {
 	case errors.Is(err, batch.ErrCommitUnknown),
-		// commit_unknown baru berakhir setelah bukti di target berhasil dibaca; selama target belum
-		// bisa dikunci, keadaan itu tetap berlaku.
+
 		j.Hold == jobs.HoldCommitUnknown:
 		return jobs.HoldCommitUnknown, "commit_unknown"
 	case j.Kind == jobs.KindCompensate && (prog.Batches > 0 || errors.Is(err, batch.ErrUnsafe)):
@@ -507,8 +491,6 @@ func (w *Worker) finish(ctx context.Context, j *jobs.Job, exec string, prog batc
 	telemetry.Event(ctx, slog.LevelInfo, "job.finished", outcome, slog.String("hold", hold))
 }
 
-// retry menjadwalkan ulang job, atau menandainya failed bila jatah retry habis. Dipanggil hanya
-// setelah attempt (jika ada) tercatat hasilnya.
 func (w *Worker) retry(ctx context.Context, j *jobs.Job, hold string, cause error, lost *atomic.Bool) {
 	if lost.Load() {
 		return
@@ -529,8 +511,6 @@ func (w *Worker) retry(ctx context.Context, j *jobs.Job, hold string, cause erro
 	telemetry.Event(ctx, slog.LevelError, "job.finished", "failed", slog.String("hold", hold), slog.String("error", telemetry.RedactError(cause)))
 }
 
-// reject mencatat penolakan revalidasi sebagai attempt gagal (history mencatat semua attempt)
-// memakai snapshot plan saat enqueue, lalu menutup job tanpa menyentuh Target DB.
 func (w *Worker) reject(ctx context.Context, j *jobs.Job, snap workflow.Plan, cause error, lost *atomic.Bool) {
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()

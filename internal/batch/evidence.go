@@ -13,11 +13,10 @@ import (
 )
 
 const (
-	proofV2 byte = 2 // hash row_manifest penuh setiap seal: O(seluruh baris) per batch
-	proofV3 byte = 3 // memakai manifest_digest yang dihitung sekali saat checkpoint ditulis
+	proofV2 byte = 2
+	proofV3 byte = 3
 )
 
-// proof: v3 untuk seal baru; v2 hanya untuk memverifikasi seal yang sudah ada.
 func (r *Runner) proof(ctx context.Context, q queryer, sp Spec, version byte) ([]byte, error) {
 	manifest := "manifest_digest"
 	if version == proofV2 {
@@ -39,7 +38,6 @@ SELECT digest FROM (
 	return mac.Sum([]byte{version}), nil
 }
 
-// legacyProof reproduces the original PostgreSQL jsonb text without materializing all checkpoints.
 func (r *Runner) legacyProof(ctx context.Context, q queryer, sp Spec) ([]byte, error) {
 	mac := hmac.New(sha256.New, r.EvidenceKey)
 	io.WriteString(mac, strings.Join([]string{"pg-v1", sp.Binding, strconv.FormatInt(sp.RootID, 10), sp.Op, ""}, "\x00"))

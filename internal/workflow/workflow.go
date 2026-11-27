@@ -644,7 +644,7 @@ func (s *Service) ProposeUsing(ctx context.Context, tx pgx.Tx, p reqctx.Principa
 				return migration.ValidationError("Revisi harus sama dengan revisi execution target.")
 			}
 			target = &t
-			// Both directions use the batch configuration of the referenced attempt.
+
 			err = tx.QueryRow(ctx, `SELECT j.plan->>'Mode',coalesce((j.plan->>'BatchSize')::int,0),coalesce(j.plan->>'CursorColumn',''),coalesce(j.plan->>'Scope','')
       FROM migration_executions e JOIN jobs j ON j.id::text=e.job_id WHERE e.id=$1 AND j.plan->>'Mode'='batch'`, t).Scan(&in.Mode, &in.BatchSize, &in.CursorColumn, &in.Scope)
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {

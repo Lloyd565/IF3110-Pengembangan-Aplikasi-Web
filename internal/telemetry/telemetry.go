@@ -1,6 +1,3 @@
-// Package telemetry: hook bersama untuk logging SQL, tracing, dan metrics queue/worker.
-// PgxTracer dipasang pada konfigurasi pool mana pun (platform, target, explorer M1) sehingga
-// setiap SQL, termasuk read-only, tercatat di log JSON (slog) dan menjadi span OpenTelemetry.
 package telemetry
 
 import (
@@ -26,7 +23,6 @@ import (
 
 const maxQueryLog = 2000
 
-// Info: atribut korelasi yang ikut pada setiap log dan span di dalam satu pekerjaan.
 type Info struct {
 	Actor         string
 	Database      string
@@ -52,9 +48,6 @@ func From(ctx context.Context) Info {
 
 type quietKey struct{}
 
-// Quiet menandai query internal yang berulang tanpa henti (polling queue, heartbeat, scrape metrics).
-// Query itu tetap tercatat tetapi pada level Debug dan tanpa span, supaya worker yang menganggur
-// tidak membanjiri log (±34 ribu baris per jam per worker bila dicatat sebagai Info).
 func Quiet(ctx context.Context) context.Context { return context.WithValue(ctx, quietKey{}, true) }
 
 func isQuiet(ctx context.Context) bool { q, _ := ctx.Value(quietKey{}).(bool); return q }
@@ -94,17 +87,13 @@ func (i Info) attrs() []slog.Attr {
 	return a
 }
 
-// Event mencatat satu kejadian penting (job.claimed, job.retry, lock.acquired, batch.committed, ...).
 func Event(ctx context.Context, level slog.Level, event, status string, extra ...slog.Attr) {
 	attrs := append([]slog.Attr{slog.String("event", event), slog.String("status", status)}, From(ctx).attrs()...)
 	slog.Default().LogAttrs(ctx, level, event, append(attrs, extra...)...)
 }
 
-// Tracer mengambil tracer dari provider global (diatur observability.New di proses API/worker).
 func Tracer() trace.Tracer { return otel.Tracer("if3110/worker") }
 
-// RedactSQL menyamarkan literal string dan isi dollar-quote, tempat password atau data sensitif
-// biasanya ditulis (mis. ALTER ROLE ... PASSWORD '...'), lalu memotong query yang terlalu panjang.
 func RedactSQL(q string) string {
 	if strings.IndexByte(q, 0) >= 0 {
 		return "[SQL redacted]"
@@ -186,7 +175,6 @@ func RedactError(err error) string {
 	return "Operasi database gagal."
 }
 
-// RedactArgs: angka, boolean, dan waktu boleh tampil; teks dan biner disamarkan.
 func RedactArgs(args []any) []string {
 	out := make([]string, len(args))
 	for i, a := range args {
@@ -204,8 +192,6 @@ func RedactArgs(args []any) []string {
 	return out
 }
 
-// PgxTracer memasang logging dan span pada setiap query pgx. begin, commit, dan rollback ikut
-// tercatat terpisah karena pgx menjalankannya sebagai statement.
 type PgxTracer struct{}
 
 type spanKey struct{}
@@ -246,7 +232,7 @@ func (PgxTracer) TraceQueryEnd(ctx context.Context, conn *pgx.Conn, d pgx.TraceQ
 	span, _ := ctx.Value(spanKey{}).(trace.Span)
 	status, level := "ok", slog.LevelInfo
 	if isQuiet(ctx) {
-		level = slog.LevelDebug // kegagalan di bawah tetap dinaikkan ke Warn
+		level = slog.LevelDebug
 	}
 	attrs := []slog.Attr{slog.Float64("duration_ms", float64(time.Since(start).Microseconds())/1000)}
 	if d.CommandTag.String() != "" {
@@ -271,14 +257,11 @@ func (PgxTracer) TraceQueryEnd(ctx context.Context, conn *pgx.Conn, d pgx.TraceQ
 	}
 }
 
-// Install memasang PgxTracer pada konfigurasi pool.
 func Install(cfg *pgxpool.Config) *pgxpool.Config {
 	cfg.ConnConfig.Tracer = PgxTracer{}
 	return cfg
 }
 
-// Metrics: metrics queue/migration untuk endpoint Prometheus. Label hanya status/outcome
-// (kardinalitas kecil); job ID, user ID, dan SQL tidak pernah menjadi label.
 type Metrics struct {
 	queueWait, lockWait, duration *prometheus.HistogramVec
 	retries, batches, rows        prometheus.Counter
@@ -313,7 +296,6 @@ func (m *Metrics) BatchCommitted(rows int64) {
 	m.rows.Add(float64(rows))
 }
 
-// jobCollector membaca jumlah job per status langsung dari tabel jobs saat scrape.
 type jobCollector struct{ db *pgxpool.Pool }
 
 var jobsDesc = prometheus.NewDesc("if3110_jobs", "Jumlah job per status.", []string{"status"}, nil)
@@ -323,7 +305,7 @@ func (c *jobCollector) Describe(ch chan<- *prometheus.Desc) { ch <- jobsDesc }
 func (c *jobCollector) Collect(ch chan<- prometheus.Metric) {
 	ctx, cancel := context.WithTimeout(Quiet(context.Background()), 2*time.Second)
 	defer cancel()
-	// Query langsung (bukan lewat paket jobs) agar telemetry tidak membentuk siklus impor dengan dbconn.
+
 	counts := map[string]int64{}
 	if rows, err := c.db.Query(ctx, `SELECT status, count(*) FROM jobs GROUP BY status`); err == nil {
 		for rows.Next() {

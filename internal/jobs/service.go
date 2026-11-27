@@ -16,7 +16,6 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/workflow"
 )
 
-// Service memenuhi contracts.Jobs untuk API progres dan pemulihan batch.
 type Service struct {
 	DB    *pgxpool.Pool
 	Authz *authz.Authorizer
@@ -77,10 +76,6 @@ func (s *Service) Get(ctx context.Context, _ reqctx.Principal, connID uuid.UUID,
 	return pub, nil
 }
 
-// Recover memulihkan job yang tertahan. resume memakai pengajuan semula (approval-nya tetap
-// divalidasi ulang oleh worker) dan hanya memproses batch yang belum committed. compensate membuat
-// pengajuan rollback baru atas execution yang tertahan: arah berbeda sehingga seluruh leader harus
-// menyetujui ulang sebelum job kompensasi masuk queue.
 func (s *Service) Recover(ctx context.Context, p reqctx.Principal, connID uuid.UUID, id, action, key string) (contracts.ChangeRequest, error) {
 	if err := s.Authz.Can(ctx, p, connID, authz.MigrationExecute); err != nil {
 		return contracts.ChangeRequest{}, apiErr(403, "forbidden", "Anda tidak punya izin menjalankan pemulihan pada database ini.")
@@ -142,7 +137,7 @@ func (s *Service) recover(ctx context.Context, p reqctx.Principal, j *Job, actio
 		if active {
 			return contracts.ChangeRequest{}, apiErr(409, "conflict", "Sudah ada job lanjutan yang sedang berjalan.")
 		}
-		// The original request still supplies the approved SQL. The new job belongs to the resumer.
+
 		plan.ActorID = p.UserID
 		resumePlan, err := json.Marshal(plan)
 		if err != nil {
@@ -157,8 +152,7 @@ func (s *Service) recover(ctx context.Context, p reqctx.Principal, j *Job, actio
 		if !pub.CanCompensate || j.ExecutionID == "" {
 			return contracts.ChangeRequest{}, apiErr(409, "conflict", "Job ini tidak bisa dikompensasi pada statusnya sekarang.")
 		}
-		// Idempoten: selama pengajuan kompensasi untuk execution yang sama masih terbuka (draf atau menunggu
-		// review), permintaan ulang atau klik ganda mengembalikan pengajuan itu, bukan membuat yang baru.
+
 		var open string
 		err := tx.QueryRow(ctx, `SELECT id::text FROM migration_requests WHERE connection_id = $1 AND action = 'rollback'
 			AND target_execution_id = $2::uuid AND status IN ('draft','pending_review') ORDER BY created_at DESC LIMIT 1`,

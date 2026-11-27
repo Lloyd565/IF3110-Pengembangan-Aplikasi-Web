@@ -2,8 +2,6 @@ package workflow
 
 import "testing"
 
-// Rollback yang menargetkan execution penahan adalah kompensasi untuk memulihkannya, termasuk ketika
-// kompensasi sebelumnya sendiri tertahan commit_unknown. Hanya execution penahan itu yang dikecualikan.
 func TestRecoveryRollbackPassesOnlyTheBlockingExecution(t *testing.T) {
 	for _, status := range []string{"partial", "partially_reverted", "commit_unknown"} {
 		p := replay([]attempt{ok(1, A, "apply"), {ID: "E2", MigrationID: B, Action: "apply", Status: status}})
@@ -20,7 +18,7 @@ func TestRecoveryRollbackPassesOnlyTheBlockingExecution(t *testing.T) {
 }
 
 func TestCompensationStuckInCommitUnknownCanBeContinued(t *testing.T) {
-	// apply E2 berhenti partial, kompensasinya (rollback E3) tertahan commit_unknown.
+
 	p := replay([]attempt{
 		ok(1, A, "apply"),
 		{ID: "E2", MigrationID: B, Action: "apply", Status: "partial"},
@@ -38,7 +36,7 @@ func TestCompensationStuckInCommitUnknownCanBeContinued(t *testing.T) {
 }
 
 func TestFailedAttemptIsNotARecoveryTarget(t *testing.T) {
-	// failed tidak meninggalkan perubahan committed, jadi tidak menahan dan tidak punya jalur kompensasi.
+
 	p := replay([]attempt{ok(1, A, "apply"), {ID: "E2", MigrationID: B, Action: "apply", Status: "failed"}})
 	if msg := p.check("rollback", B, "E2"); msg == "" {
 		t.Fatal("rollback atas attempt failed harus ditolak")

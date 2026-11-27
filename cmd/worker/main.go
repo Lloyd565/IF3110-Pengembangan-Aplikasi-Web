@@ -1,5 +1,3 @@
-// Command worker menjalankan job migration dari queue persisten. Proses terpisah dari API: SQL
-// migration tidak pernah berjalan di dalam request HTTP.
 package main
 
 import (
@@ -83,8 +81,7 @@ func main() {
 		observer.Shutdown(ctx)
 	}()
 	log.SetOutput(slog.NewLogLogger(slog.Default().Handler(), slog.LevelInfo).Writer())
-	// Setelah logger JSON siap, supaya SQL migrasi pun tercatat sebagai JSON. Aman dijalankan bersamaan
-	// dengan API: migrasi platform dilindungi advisory lock.
+
 	if err := platformdb.Migrate(context.Background(), pool); err != nil {
 		log.Fatalf("migrasi platform DB gagal: %v", err)
 	}
@@ -103,7 +100,7 @@ func main() {
 		Lease:            duration("WORKER_LEASE", 30*time.Second),
 		Poll:             duration("WORKER_POLL", time.Second),
 		LockWait:         duration("WORKER_LOCK_WAIT", 30*time.Second),
-		StatementTimeout: duration("WORKER_SQL_TIMEOUT", 30*time.Minute), // terpisah dari timeout HTTP
+		StatementTimeout: duration("WORKER_SQL_TIMEOUT", 30*time.Minute),
 		Metrics:          metrics,
 	}
 

@@ -55,7 +55,6 @@ type ConnAccess struct {
 	ConnectionID uuid.UUID
 	Name         string
 	Level        Level
-	// Groups: nama group milik user sendiri yang memberinya akses ke koneksi ini.
-	// Sengaja hanya group user itu; anggota lain tidak pernah ikut diambil.
+
 	Groups []string
 }

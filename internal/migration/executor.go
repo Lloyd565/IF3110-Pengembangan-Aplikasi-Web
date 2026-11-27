@@ -257,7 +257,7 @@ func appliedPG(ctx context.Context, target *pgxpool.Pool, id int64) (bool, error
 		return false, err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	// Ambil lock yang sama dengan migration: kalau transaksinya masih jalan, tunggu sampai selesai.
+
 	if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL lock_timeout = %d; %s`, LockTimeout.Milliseconds(), pgLock)); err != nil {
 		return false, err
 	}

@@ -17,9 +17,6 @@ func (s *Service) Revalidate(ctx context.Context, requestID string, recovery boo
 	return err
 }
 
-// PrepareRecovery merevalidasi pengajuan untuk resume job yang tertahan (partial atau
-// commit_unknown). Berbeda dari Prepare, penahan posisi tidak ikut diperiksa karena justru
-// itulah yang sedang dipulihkan; approval seluruh leader, revisi, dan izin eksekusi tetap wajib sah.
 func (s *Service) PrepareRecovery(ctx context.Context, requestID string, resumeActorID int64) (Plan, error) {
 	id, err := parseUUID(requestID)
 	if err != nil {

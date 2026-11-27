@@ -31,8 +31,7 @@ func validateBatchRequest(x request) error {
 		return migration.ValidationError(err.Error())
 	}
 	if x.Action != "rollback" {
-		// Kompensasi batch hanya bisa mengembalikan baris yang tercatat di manifest, dan manifest hanya
-		// direkam untuk UPDATE. DELETE/INSERT batch akan lolos jalan tapi tidak pernah bisa dikompensasi.
+
 		if _, tracked, err := sqlpolicy.BatchReplay(x.SQL, x.CursorColumn, false); err != nil || !tracked {
 			return migration.ValidationError("Mode batch hanya mendukung UPDATE, karena hanya baris UPDATE yang dicatat sehingga bisa dikompensasi.")
 		}

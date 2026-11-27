@@ -25,8 +25,6 @@ func sealedRunner(t *testing.T, name string) (*Runner, func(string, ...any)) {
 	return &Runner{Pool: db, EvidenceKey: testKey}, exec
 }
 
-// Dengan EvidenceKey, run ulang (duplicate delivery) dan kompensasi tetap berjalan karena bukti
-// di-seal pada setiap commit dan diverifikasi sebelum dipakai.
 func TestSealedEvidenceRunResumeAndCompensate(t *testing.T) {
 	r, _ := sealedRunner(t, "ev_ok")
 	ctx := context.Background()
@@ -91,8 +89,6 @@ func TestResumeWithLegacySeal(t *testing.T) {
 	}
 }
 
-// Checkpoint yang diubah di luar platform (atau oleh SQL migration) tidak cocok dengan HMAC, jadi
-// worker berhenti di commit_unknown alih-alih mempercayai bukti palsu.
 func TestTamperedCheckpointIsNotTrusted(t *testing.T) {
 	r, exec := sealedRunner(t, "ev_tamper")
 	ctx := context.Background()
@@ -122,8 +118,6 @@ func TestTamperedCheckpointIsNotTrusted(t *testing.T) {
 	}
 }
 
-// Seal v3 memakai manifest_digest, bukan isi manifest. Manifest yang diubah (di luar platform maupun
-// lewat SQL migration) tetap ketahuan karena digest-nya generated column; seal v2 lama tetap terverifikasi.
 func TestManifestDigestDetectsTamperingAndKeepsV2Seals(t *testing.T) {
 	r, exec := sealedRunner(t, "ev_digest")
 	ctx := context.Background()
@@ -160,7 +154,6 @@ func TestManifestDigestDetectsTamperingAndKeepsV2Seals(t *testing.T) {
 	}
 }
 
-// Bukti yang di-seal dengan kunci lain (instance platform lain, atau kunci yang sudah diganti) tidak dipercaya.
 func TestEvidenceSealedWithAnotherKeyIsRejected(t *testing.T) {
 	r, _ := sealedRunner(t, "ev_key")
 	ctx := context.Background()
@@ -178,9 +171,6 @@ func TestEvidenceSealedWithAnotherKeyIsRejected(t *testing.T) {
 	}
 }
 
-// SQL migration tidak bisa menyebut _platform secara langsung (ditolak policy). Lewat SQL dinamis
-// namanya bisa disamarkan, tetapi perubahan metadata di dalam transaksi migration terdeteksi dan
-// seluruh transaksi dibatalkan, termasuk perubahan datanya.
 func TestMigrationSQLCannotTamperWithControlTables(t *testing.T) {
 	if err := sqlpolicy.Check(`DELETE FROM _platform.migration_seals`); err == nil {
 		t.Fatal("akses langsung ke _platform harus ditolak policy")
@@ -205,7 +195,6 @@ func TestMigrationSQLCannotTamperWithControlTables(t *testing.T) {
 		t.Fatalf("data migration yang menyerang metadata harus ikut dibatalkan: %v", b)
 	}
 
-	// Mode batch: fungsi yang dibuat sebelumnya lalu dipanggil dari UPDATE batch juga tertangkap.
 	exec(`CREATE FUNCTION perf.sneaky(v bigint) RETURNS bigint LANGUAGE plpgsql AS $$
 		BEGIN EXECUTE 'DELETE FROM ' || quote_ident('_plat' || 'form') || '.migration_seals'; RETURN v; END $$`)
 	sneaky := `UPDATE perf.accounts SET balance = perf.sneaky(balance) WHERE id > $1 AND id <= $2`
@@ -217,8 +206,6 @@ func TestMigrationSQLCannotTamperWithControlTables(t *testing.T) {
 	}
 }
 
-// Manifest mencatat versi baris (xmin/ctid). Baris yang diubah pihak lain setelah batch up tidak
-// boleh ditimpa oleh kompensasi; kompensasi berhenti tanpa mengubah apa pun.
 func TestCompensationRefusesRowsChangedAfterApply(t *testing.T) {
 	r, exec := sealedRunner(t, "ev_manifest")
 	ctx := context.Background()

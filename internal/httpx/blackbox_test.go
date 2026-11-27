@@ -165,7 +165,7 @@ func TestIntegrationBlackboxConcurrentRotation(t *testing.T) {
 	if _, err := a.db.Exec(context.Background(), `UPDATE sessions SET rotated_at = now() - interval '16 minutes' WHERE user_id = 1`); err != nil {
 		t.Fatal(err)
 	}
-	// All requests deliberately use the same old cookie, as parallel browser requests do.
+
 	transportClient := *a.client
 	transportClient.Jar = nil
 	var wg sync.WaitGroup
@@ -426,7 +426,7 @@ func TestIntegrationBlackboxRotationAndExpiry(t *testing.T) {
 			if r.StatusCode != 303 {
 				t.Fatal("reactivation resurrected the old session")
 			}
-			// Use a separate browser context for each new authentication.
+
 			a.client.Jar, _ = cookiejar.New(nil)
 			cookie = a.login(t)
 		})

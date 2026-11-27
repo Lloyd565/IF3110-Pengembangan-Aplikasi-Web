@@ -94,7 +94,7 @@ func TestClaimSerialPerDatabase(t *testing.T) {
 	if err != nil || j1 == nil || j1.ID != a1 {
 		t.Fatalf("klaim pertama: %+v err=%v", j1, err)
 	}
-	// a2 satu database dengan a1 yang sedang jalan: dilewati; b1 database lain boleh paralel.
+
 	j2, err := Claim(ctx, db, "w2", time.Minute)
 	if err != nil || j2 == nil || j2.ID != b1 {
 		t.Fatalf("klaim kedua harus b1 (database berbeda), dapat %+v err=%v", j2, err)
@@ -148,7 +148,7 @@ func TestLeaseExpiryFencesOldWorker(t *testing.T) {
 	if j, err := Claim(ctx, db, "lama", time.Minute); err != nil || j == nil {
 		t.Fatalf("klaim: %v %v", j, err)
 	}
-	// worker lama mati: lease dianggap kedaluwarsa.
+
 	if _, err := db.Exec(ctx, `UPDATE jobs SET lease_until = now() - interval '1 second' WHERE id = $1`, id); err != nil {
 		t.Fatal(err)
 	}
@@ -223,12 +223,12 @@ func TestQueueEnqueueOncePerRequest(t *testing.T) {
 	if err != nil || first.Status != "queued" || first.MigrationID != "7" {
 		t.Fatalf("enqueue pertama: %+v err=%v", first, err)
 	}
-	// kunci berbeda untuk pengajuan yang sama tidak boleh membuat job kedua.
+
 	again, err := enq(plan, "k2")
 	if err != nil || again.ID != first.ID {
 		t.Fatalf("pengajuan sama harus mengembalikan job yang sama: %+v err=%v", again, err)
 	}
-	// kunci yang sama untuk pengajuan lain adalah konflik.
+
 	other := plan
 	other.RequestID = uuid.NewString()
 	_, err = enq(other, "k1")
@@ -243,16 +243,15 @@ func TestQueueEnqueueOncePerRequest(t *testing.T) {
 	}
 }
 
-// BUG-02: kompensasi yang tertahan commit_unknown harus tetap punya jalur pemulihan.
 func TestStuckJobsAlwaysHaveARecoveryPath(t *testing.T) {
 	for _, c := range []struct {
 		kind, hold         string
 		resume, compensate bool
 	}{
-		{KindRun, HoldCommitUnknown, true, false},            // apply tidak pasti: resume membaca bukti dulu
-		{KindRun, HoldPartial, true, true},                   // apply sebagian: lanjutkan atau batalkan
-		{KindCompensate, HoldPartiallyReverted, false, true}, // kompensasi sebagian: lanjutkan kompensasi
-		{KindCompensate, HoldCommitUnknown, false, true},     // kompensasi tidak pasti: kompensasi lagi
+		{KindRun, HoldCommitUnknown, true, false},
+		{KindRun, HoldPartial, true, true},
+		{KindCompensate, HoldPartiallyReverted, false, true},
+		{KindCompensate, HoldCommitUnknown, false, true},
 		{KindResume, HoldCommitUnknown, true, false},
 	} {
 		out := Public(&Job{Kind: c.kind, Status: StatusFailed, Hold: c.hold, Plan: json.RawMessage(`{}`)})
@@ -287,8 +286,6 @@ func TestPublicStatusMapping(t *testing.T) {
 	}
 }
 
-// Job yang memulihkan attempt-nya (attempt_open/commit_unknown) harus jalan sebelum job lain pada
-// target yang sama, termasuk job retry_wait yang sudah jatuh tempo, bukan hanya job queued.
 func TestRecoveringJobBlocksRetryWaitAndQueuedJobs(t *testing.T) {
 	db := newDB(t)
 	ctx := context.Background()
@@ -303,7 +300,6 @@ func TestRecoveringJobBlocksRetryWaitAndQueuedJobs(t *testing.T) {
 	set(waiting, `status='retry_wait', next_retry_at=now()-interval '1 second'`)
 	set(other, `status='retry_wait', next_retry_at=now()-interval '1 second'`)
 
-	// Database lain tidak ikut tertahan.
 	if j, err := Claim(ctx, db, "w", time.Minute); err != nil || j == nil || j.ID != other {
 		t.Fatalf("job database lain harus tetap bisa diklaim: %+v err=%v", j, err)
 	}
@@ -323,7 +319,6 @@ func TestRecoveringJobBlocksRetryWaitAndQueuedJobs(t *testing.T) {
 	_ = queued
 }
 
-// Dua job pemulihan pada target yang sama tidak boleh saling menunggu: id terkecil jalan dulu.
 func TestTwoRecoveringJobsDoNotDeadlock(t *testing.T) {
 	db := newDB(t)
 	ctx := context.Background()

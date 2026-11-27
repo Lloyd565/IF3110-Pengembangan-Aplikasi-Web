@@ -15,14 +15,10 @@ import (
 	"github.com/Lloyd565/IF3110-Pengembangan-Aplikasi-Web/internal/reqctx"
 )
 
-// Halaman Platform Admin. Setiap halaman satu URL: GET menampilkan, POST
-// menjalankan aksi lewat field tersembunyi "action", lalu redirect (PRG).
-
 const maxAdminForm = 64 << 10
 
 type adminFlash struct{ OK, Error string }
 
-// adminOKMessages: pesan sukses hanya dari daftar tetap (nilai ?ok=), bukan teks bebas dari URL.
 var adminOKMessages = map[string]string{
 	"created": "Berhasil dibuat.",
 	"updated": "Perubahan disimpan.",
@@ -34,7 +30,6 @@ var (
 	adminSSLModes  = []string{"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
 )
 
-// adminGuard: pemeriksaan di handler sendiri (berlapis dengan requireAdmin di route).
 func (s *Server) adminGuard(w http.ResponseWriter, r *http.Request) (reqctx.Principal, bool) {
 	p, ok := reqctx.CurrentPrincipal(r.Context())
 	if !ok {
@@ -45,7 +40,7 @@ func (s *Server) adminGuard(w http.ResponseWriter, r *http.Request) (reqctx.Prin
 		s.renderError(w, r, http.StatusForbidden, "Halaman ini hanya untuk Platform Admin.")
 		return p, false
 	}
-	if s.Admin == nil { // service belum dipasang: perilaku sama dengan stub lama (501)
+	if s.Admin == nil {
 		notImplemented(w, r)
 		return p, false
 	}
@@ -65,7 +60,6 @@ func (s *Server) adminGuard(w http.ResponseWriter, r *http.Request) (reqctx.Prin
 	return p, true
 }
 
-// adminFlashFor: ubah hasil aksi menjadi pesan + status HTTP. Error tak terduga hanya dicatat di log.
 func adminFlashFor(r *http.Request, err error) (adminFlash, int) {
 	if err == nil {
 		return adminFlash{OK: adminOKMessages[r.URL.Query().Get("ok")]}, http.StatusOK
@@ -104,8 +98,6 @@ func formUUID(r *http.Request, key string) uuid.UUID {
 	id, _ := uuid.Parse(r.PostFormValue(key))
 	return id
 }
-
-// ---- /admin/users ----
 
 func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.adminGuard(w, r)
@@ -147,8 +139,6 @@ func (s *Server) renderUsers(w http.ResponseWriter, r *http.Request, p reqctx.Pr
 	fl, status := adminFlashFor(r, actErr)
 	s.render(w, r, status, "admin-users.html", map[string]any{"Users": users, "Flash": fl, "Self": p.UserID})
 }
-
-// ---- /admin/groups ----
 
 func (s *Server) adminGroups(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.adminGuard(w, r)
@@ -213,15 +203,13 @@ func (s *Server) renderGroups(w http.ResponseWriter, r *http.Request, actErr err
 	})
 }
 
-// ---- /admin/connections ----
-
 type adminConnForm struct {
 	Name, Host, Port, DBName, Username, SSLMode string
 	DBMS                                        dbconn.DBMS
 }
 
 func (f adminConnForm) params(password string) dbconn.Params {
-	port, _ := strconv.Atoi(f.Port) // tidak valid -> 0 -> ditolak validasi service
+	port, _ := strconv.Atoi(f.Port)
 	return dbconn.Params{Host: f.Host, Port: port, DBName: f.DBName, Username: f.Username, Password: password, SSLMode: f.SSLMode, DBMS: f.DBMS}
 }
 
@@ -264,7 +252,7 @@ func (s *Server) adminConnections(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			fl, status := adminFlashFor(r, err)
-			s.renderConnections(w, r, fl, status, &form, id) // password sengaja tidak dikembalikan ke form
+			s.renderConnections(w, r, fl, status, &form, id)
 			return
 		}
 		adminRedirect(w, r, "/admin/connections", code)
@@ -297,8 +285,6 @@ func (s *Server) renderConnections(w http.ResponseWriter, r *http.Request, fl ad
 		"Conns": conns, "Edit": edit, "Form": f, "Flash": fl, "SSLModes": adminSSLModes,
 	})
 }
-
-// ---- /admin/grants ----
 
 func (s *Server) adminGrants(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.adminGuard(w, r)

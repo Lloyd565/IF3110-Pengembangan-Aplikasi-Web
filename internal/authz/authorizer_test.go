@@ -28,8 +28,6 @@ func TestAuthorizer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// user 1 = anggota g_view + g_edit, user 2 = hanya g_view, user 3 = admin tanpa group,
-	// user 4 = nonaktif tapi punya grant edit.
 	mustExec(t, db, `INSERT INTO users (id, username, password_hash, is_platform_admin, is_active) VALUES
 		(1,'multi','x',false,true), (2,'viewer','x',false,true), (3,'admin','x',true,true), (4,'off','x',false,false)`)
 	mustExec(t, db, `INSERT INTO groups (id, name) VALUES (1,'g_view'), (2,'g_edit')`)
@@ -44,7 +42,9 @@ func TestAuthorizer(t *testing.T) {
 		(1,$1,'view'), (2,$1,'edit'), (1,$3,'view'), (2,$2,'edit')`, connA, connB, connGone)
 
 	az := &Authorizer{DB: db}
-	p := func(id int64, admin bool) reqctx.Principal { return reqctx.Principal{UserID: id, IsPlatformAdmin: admin} }
+	p := func(id int64, admin bool) reqctx.Principal {
+		return reqctx.Principal{UserID: id, IsPlatformAdmin: admin}
+	}
 
 	cases := []struct {
 		name string
@@ -74,7 +74,7 @@ func TestAuthorizer(t *testing.T) {
 	}
 
 	t.Run("fail closed saat DB error", func(t *testing.T) {
-		bad := testdb.Fresh(t, "authz_bad") // tanpa tabel platform, query pasti error
+		bad := testdb.Fresh(t, "authz_bad")
 		err := (&Authorizer{DB: bad}).Can(ctx, p(1, false), connA, SchemaView)
 		if err == nil {
 			t.Fatal("error pembacaan grant tidak boleh berubah menjadi boleh")
@@ -99,7 +99,7 @@ func TestAuthorizer(t *testing.T) {
 	})
 
 	t.Run("VisibleConnections menampilkan group milik sendiri saja", func(t *testing.T) {
-		// user 1 anggota g_view dan g_edit; user 2 hanya g_view. Keduanya terhubung ke A lewat grant.
+
 		got, err := az.VisibleConnections(ctx, p(1, false))
 		if err != nil || len(got) != 2 {
 			t.Fatalf("user 1: %+v, %v", got, err)
