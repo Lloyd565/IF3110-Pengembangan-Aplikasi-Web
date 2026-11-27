@@ -86,7 +86,7 @@ func TestResumeWithLegacySeal(t *testing.T) {
 	if err := r.Pool.QueryRow(ctx, `SELECT proof FROM _platform.migration_seals WHERE root_job=1 AND op='up'`).Scan(&proof); err != nil {
 		t.Fatal(err)
 	}
-	if len(proof) != sha256.Size+1 || proof[0] != proofV2 || balances(t, r.Pool)[101] != rows {
+	if len(proof) != sha256.Size+1 || proof[0] != proofV3 || balances(t, r.Pool)[101] != rows {
 		t.Fatal("resume must write new evidence and update each row once")
 	}
 }
@@ -119,6 +119,44 @@ func TestTamperedCheckpointIsNotTrusted(t *testing.T) {
 	}
 	if b := balances(t, r.Pool); b[101] != 200 || b[100] != 800 {
 		t.Fatalf("data tidak boleh berubah setelah bukti dipalsukan: %v", b)
+	}
+}
+
+// Seal v3 memakai manifest_digest, bukan isi manifest. Manifest yang diubah (di luar platform maupun
+// lewat SQL migration) tetap ketahuan karena digest-nya generated column; seal v2 lama tetap terverifikasi.
+func TestManifestDigestDetectsTamperingAndKeepsV2Seals(t *testing.T) {
+	r, exec := sealedRunner(t, "ev_digest")
+	ctx := context.Background()
+	sp := batchSpec(7, OpUp, upSQL)
+	if _, err := r.Run(ctx, sp, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	v2, err := r.proof(ctx, r.Pool, sp, proofV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec(`UPDATE _platform.migration_seals SET proof=$1 WHERE root_job=7 AND op='up'`, v2)
+	if _, done, err := r.Evidence(ctx, sp); err != nil || !done {
+		t.Fatalf("seal v2 yang sah harus tetap diterima: %v, %v", done, err)
+	}
+
+	tamper := `DO $$ BEGIN EXECUTE 'UPDATE ' || quote_ident('_plat' || 'form') || '.migration_checkpoints SET row_manifest = row_manifest || ''{"x":1}'''; END $$;
+		UPDATE perf.accounts SET balance = 0`
+	if _, err := r.Run(ctx, Spec{RootID: 8, Op: OpUp, SQL: tamper}, nil); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("SQL migration yang mengubah manifest harus ditolak: %v", err)
+	}
+
+	exec(`UPDATE _platform.migration_checkpoints SET row_manifest = row_manifest || '{"x":1}' WHERE root_job=7 AND batch_no=3`)
+	if _, _, err := r.Evidence(ctx, sp); !errors.Is(err, ErrCommitUnknown) {
+		t.Fatalf("manifest yang diubah harus membatalkan seal v2: %v", err)
+	}
+	if err := r.seal(ctx, r.Pool, sp); err != nil {
+		t.Fatal(err)
+	}
+	exec(`UPDATE _platform.migration_checkpoints SET row_manifest = row_manifest || '{"y":1}' WHERE root_job=7 AND batch_no=5`)
+	if _, _, err := r.Evidence(ctx, sp); !errors.Is(err, ErrCommitUnknown) {
+		t.Fatalf("manifest yang diubah harus membatalkan seal v3: %v", err)
 	}
 }
 

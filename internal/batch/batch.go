@@ -237,7 +237,7 @@ func ensureControl(ctx context.Context, q queryer) error {
 	var runs, cps, manifest, seals bool
 	if err := q.QueryRow(ctx, `SELECT to_regclass('_platform.migration_runs') IS NOT NULL,
 		to_regclass('_platform.migration_checkpoints') IS NOT NULL,
-  EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('_platform.migration_checkpoints') AND attname='row_manifest' AND NOT attisdropped), to_regclass('_platform.migration_seals') IS NOT NULL`).Scan(&runs, &cps, &manifest, &seals); err != nil {
+  EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('_platform.migration_checkpoints') AND attname='manifest_digest' AND NOT attisdropped), to_regclass('_platform.migration_seals') IS NOT NULL`).Scan(&runs, &cps, &manifest, &seals); err != nil {
 		return err
 	}
 	if runs && cps && manifest && seals {
@@ -262,6 +262,8 @@ func ensureControl(ctx context.Context, q queryer) error {
 			committed_at  timestamptz NOT NULL DEFAULT now(),
 			PRIMARY KEY (root_job, op, batch_no));
   ALTER TABLE _platform.migration_checkpoints ADD COLUMN IF NOT EXISTS row_manifest jsonb;
+  ALTER TABLE _platform.migration_checkpoints ADD COLUMN IF NOT EXISTS manifest_digest bytea
+    GENERATED ALWAYS AS (sha256(replace(row_manifest::text, chr(92), chr(92)||chr(92))::bytea)) STORED;
   CREATE TABLE IF NOT EXISTS _platform.migration_seals(root_job bigint NOT NULL,op text NOT NULL,proof bytea NOT NULL,PRIMARY KEY(root_job,op));
   REVOKE ALL ON SCHEMA _platform FROM PUBLIC;
   REVOKE ALL ON ALL TABLES IN SCHEMA _platform FROM PUBLIC`)

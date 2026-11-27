@@ -12,23 +12,31 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const proofV2 byte = 2
+const (
+	proofV2 byte = 2 // hash row_manifest penuh setiap seal: O(seluruh baris) per batch
+	proofV3 byte = 3 // memakai manifest_digest yang dihitung sekali saat checkpoint ditulis
+)
 
-func (r *Runner) proof(ctx context.Context, q queryer, sp Spec) ([]byte, error) {
+// proof: v3 untuk seal baru; v2 hanya untuk memverifikasi seal yang sudah ada.
+func (r *Runner) proof(ctx context.Context, q queryer, sp Spec, version byte) ([]byte, error) {
+	manifest := "manifest_digest"
+	if version == proofV2 {
+		manifest = "row_manifest"
+	}
 	mac := hmac.New(sha256.New, r.EvidenceKey)
-	io.WriteString(mac, strings.Join([]string{"pg-v2", sp.Binding, strconv.FormatInt(sp.RootID, 10), sp.Op, ""}, "\x00"))
+	io.WriteString(mac, strings.Join([]string{"pg-v" + strconv.Itoa(int(version)), sp.Binding, strconv.FormatInt(sp.RootID, 10), sp.Op, ""}, "\x00"))
 	if err := streamState(ctx, q, mac, `
 SELECT digest FROM (
   SELECT 0 AS section, 0 AS seq, sha256(convert_to(coalesce((
     SELECT jsonb_build_array(scope_max,total_rows,finished_at IS NOT NULL)::text
     FROM _platform.migration_runs WHERE root_job=$1 AND op=$2), 'null'), 'UTF8')) AS digest
   UNION ALL
-  SELECT 1, batch_no, sha256(convert_to(jsonb_build_array(batch_no,cursor_from,cursor_to,rows_affected,row_manifest)::text, 'UTF8'))
+  SELECT 1, batch_no, sha256(convert_to(jsonb_build_array(batch_no,cursor_from,cursor_to,rows_affected,`+manifest+`)::text, 'UTF8'))
     FROM _platform.migration_checkpoints WHERE root_job=$1 AND op=$2
 ) states ORDER BY section, seq`, sp.RootID, sp.Op); err != nil {
 		return nil, err
 	}
-	return mac.Sum([]byte{proofV2}), nil
+	return mac.Sum([]byte{version}), nil
 }
 
 // legacyProof reproduces the original PostgreSQL jsonb text without materializing all checkpoints.
@@ -95,7 +103,7 @@ func (r *Runner) seal(ctx context.Context, q queryer, sp Spec) error {
 	if len(r.EvidenceKey) == 0 {
 		return nil
 	}
-	proof, err := r.proof(ctx, q, sp)
+	proof, err := r.proof(ctx, q, sp, proofV3)
 	if err != nil {
 		return err
 	}
@@ -133,8 +141,8 @@ func (r *Runner) verify(ctx context.Context, q queryer, sp Spec, allowNew bool) 
 	switch {
 	case len(existing) == sha256.Size:
 		expected, err = r.legacyProof(ctx, q, sp)
-	case len(existing) == sha256.Size+1 && existing[0] == proofV2:
-		expected, err = r.proof(ctx, q, sp)
+	case len(existing) == sha256.Size+1 && (existing[0] == proofV2 || existing[0] == proofV3):
+		expected, err = r.proof(ctx, q, sp, existing[0])
 	default:
 		return fmt.Errorf("%w: format bukti target tidak dikenal", ErrCommitUnknown)
 	}
@@ -176,12 +184,13 @@ func (r *Runner) controlState(ctx context.Context, q queryer) (string, error) {
 SELECT digest FROM (
   SELECT 0 AS section, root_job, op, 0 AS seq, sha256(convert_to(to_jsonb(r)::text,'UTF8')) AS digest FROM _platform.migration_runs r
   UNION ALL
-  SELECT 1, root_job, op, batch_no, sha256(convert_to(to_jsonb(c)::text,'UTF8')) FROM _platform.migration_checkpoints c
+  SELECT 1, root_job, op, batch_no, sha256(convert_to(jsonb_build_array(root_job,op,batch_no,cursor_from,cursor_to,
+     rows_affected,committed_at,manifest_digest)::text,'UTF8')) FROM _platform.migration_checkpoints c
   UNION ALL
   SELECT 2, root_job, op, 0, sha256(convert_to(to_jsonb(s)::text,'UTF8')) FROM _platform.migration_seals s
   UNION ALL
   SELECT 3, c.oid::bigint, '', 0, sha256(convert_to(jsonb_build_array(c.oid,c.relname,c.relkind,c.relowner,c.relacl,
-     c.relrowsecurity,c.relforcerowsecurity,c.relhasrules,c.relhastriggers)::text,'UTF8'))
+     c.relrowsecurity,c.relforcerowsecurity,c.relhasrules,c.relhastriggers,c.relnatts)::text,'UTF8'))
   FROM pg_catalog.pg_class c WHERE c.relnamespace='_platform'::regnamespace
 ) states ORDER BY section, root_job, op, seq`)
 	return string(hash.Sum(nil)), err
