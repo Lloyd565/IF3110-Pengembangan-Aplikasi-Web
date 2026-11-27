@@ -1,9 +1,3 @@
-"""Rangkum summary.json k6 per tahap beban menjadi tabel Markdown.
-
-Pemakaian: python tests/performance/stages.py tests/performance/results/summary.json
-Request/s dan job/s = jumlah pada tahap / durasi tahap. Nilai `rate` bawaan k6 dihitung
-terhadap durasi seluruh run, jadi tidak dipakai untuk throughput per tahap.
-"""
 import json
 import sys
 
