@@ -380,19 +380,31 @@ const selectRequest = `
 	       coalesce(q.target_execution_id::text, ''), q.mode, q.batch_size, q.cursor_column, q.scope, q.status,
 	       q.created_by, q.queued_by, r.sql_up, r.sql_down, r.irreversible,
 	       (SELECT id::text FROM migration_revisions WHERE migration_id = q.migration_id ORDER BY number DESC LIMIT 1),
- q.target_fingerprint = ` + targetFingerprint + ` AND q.target_identity = ` + dbconn.IdentityFingerprint + `, q.target_fingerprint, q.target_identity,q.target_server
+	       q.target_fingerprint = ` + targetFingerprint + ` AND q.target_identity = ` + dbconn.IdentityFingerprint + `,
+	       q.target_fingerprint, q.target_identity, q.target_server,
+	       coalesce(j.id::text, ''), coalesce(j.status, ''), coalesce(j.hold, '')
 	FROM migration_requests q
 	JOIN migrations m ON m.id = q.migration_id
 	JOIN migration_revisions r ON r.id = q.revision_id
-JOIN db_connections dc ON dc.id=q.connection_id`
+	JOIN db_connections dc ON dc.id = q.connection_id
+	LEFT JOIN LATERAL (
+		SELECT id, status, hold FROM jobs
+		WHERE q.status = 'queued' AND request_id = q.id AND connection_id = q.connection_id
+		ORDER BY id DESC LIMIT 1
+	) j ON true`
 
 func scanRequest(row pgx.Row) (request, error) {
 	var x request
+	var jobID, jobStatus, hold string
 	err := row.Scan(&x.ID, &x.connID, &x.migrationID, &x.MigrationName, &x.RevisionID, &x.Action,
 		&x.TargetExecutionID, &x.Mode, &x.BatchSize, &x.CursorColumn, &x.Scope, &x.stored,
-		&x.createdBy, &x.queuedBy, &x.upSQL, &x.downSQL, &x.irrev, &x.latestRev, &x.targetMatches, &x.fingerprint, &x.identity, &x.physical)
+		&x.createdBy, &x.queuedBy, &x.upSQL, &x.downSQL, &x.irrev, &x.latestRev, &x.targetMatches, &x.fingerprint, &x.identity, &x.physical,
+		&jobID, &jobStatus, &hold)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return x, migration.ErrNotFound
+	}
+	if jobID != "" {
+		x.Job = &contracts.JobSummary{ID: jobID, Status: contracts.PublicJobStatus(jobStatus, hold)}
 	}
 	x.DatabaseID, x.MigrationID = x.connID.String(), strconv.FormatInt(x.migrationID, 10)
 	x.SQL = x.upSQL

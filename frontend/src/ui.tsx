@@ -25,7 +25,7 @@ export function ErrorBox({ error, retry }: { error: unknown; retry?: () => void 
 export function Loading() { return <p className="loading" role="status">Memuat data…</p> }
 export function Empty({ children = 'Belum ada data.' }: { children?: ReactNode }) { return <p className="empty">{children}</p> }
 export function Notice({ children }: { children: ReactNode }) { return <div className="alert notice" role="status">{children}</div> }
-export function Status({ value }: { value: string }) { return <span className={`badge ${['success', 'approved', 'active', 'edit'].includes(value) ? 'good' : ['failed', 'rejected', 'irreversible', 'unknown', 'partially_reverted'].includes(value) ? 'bad' : ''}`}>{value.replaceAll('_', ' ')}</span> }
+export function Status({ value, label }: { value: string; label?: string }) { return <span className={`badge ${['success', 'approved', 'active', 'edit'].includes(value) ? 'good' : ['failed', 'rejected', 'irreversible', 'unknown', 'partially_reverted'].includes(value) ? 'bad' : ''}`}>{label ?? value.replaceAll('_', ' ')}</span> }
 export function Panel({ title, children }: { title: string; children: ReactNode }) { return <section className="panel"><h2>{title}</h2>{children}</section> }
 export function TableWrap({ children }: { children: ReactNode }) { return <div className="table-wrap" tabIndex={0}>{children}</div> }
 export function SQL({ value }: { value: string }) { return <pre className="sql" tabIndex={0}><code>{value || '—'}</code></pre> }

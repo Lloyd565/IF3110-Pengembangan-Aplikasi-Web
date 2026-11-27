@@ -65,16 +65,17 @@ type Review struct {
 
 type ChangeRequest struct {
 	ChangeInput
-	ID            string     `json:"id"`
-	DatabaseID    string     `json:"database_id"`
-	MigrationName string     `json:"migration_name"`
-	Status        string     `json:"status"`
-	Approvals     []Approval `json:"approvals"`
-	Validation    []string   `json:"validation"`
-	CanApprove    bool       `json:"can_approve"`
-	CanSubmit     bool       `json:"can_submit"`
-	CanEnqueue    bool       `json:"can_enqueue"`
-	SQL           string     `json:"sql"`
+	ID            string      `json:"id"`
+	DatabaseID    string      `json:"database_id"`
+	MigrationName string      `json:"migration_name"`
+	Status        string      `json:"status"`
+	Job           *JobSummary `json:"job,omitempty"`
+	Approvals     []Approval  `json:"approvals"`
+	Validation    []string    `json:"validation"`
+	CanApprove    bool        `json:"can_approve"`
+	CanSubmit     bool        `json:"can_submit"`
+	CanEnqueue    bool        `json:"can_enqueue"`
+	SQL           string      `json:"sql"`
 }
 
 type Execution struct {
@@ -92,6 +93,21 @@ type Execution struct {
 	ErrorMessage       string    `json:"error_message,omitempty"`
 	CanRollback        bool      `json:"can_rollback"`
 	CanForward         bool      `json:"can_forward"`
+}
+
+type JobSummary struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+func PublicJobStatus(status, hold string) string {
+	switch {
+	case status == "failed" && hold != "none":
+		return hold
+	case status == "retry_wait":
+		return "queued"
+	}
+	return status
 }
 
 type Job struct {
