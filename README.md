@@ -188,6 +188,24 @@ Adapter memeriksa grant sebelum memanggil layanan. Enqueue memerlukan header `Id
 
 Worker memakai `WORKER_ID` (default hostname-PID), `WORKER_LEASE=30s`, `WORKER_POLL=1s`, `WORKER_LOCK_WAIT=30s`, `WORKER_SQL_TIMEOUT=30m`, dan `WORKER_METRICS_ADDR=:9102`. Setiap worker memakai alamat metrics yang tersedia pada hostnya.
 
+### Pemulihan lock ketika worker gagal
+
+Perlindungan memakai dua lapis. Keduanya pulih tanpa campur tangan manual ketika worker mati.
+
+**1. Lease job di database platform.** `jobs.Claim` ([`internal/jobs/jobs.go`](internal/jobs/jobs.go)) mengubah job menjadi `running` dengan `worker_id` dan `lease_until = now() + WORKER_LEASE`. Worker memperbarui lease lewat heartbeat setiap sepertiga `WORKER_LEASE`. Semua perubahan status memakai fencing `WHERE worker_id = $worker AND lease_until > now()`. Akibatnya, worker lama yang kehilangan lease tidak bisa lagi menulis hasil (`ErrLeaseLost`), lalu menghentikan pekerjaannya sendiri. Job `running` dengan lease kedaluwarsa dapat diklaim ulang oleh worker lain. Job pemulihan (`attempt_open` atau `commit_unknown`) diklaim lebih dulu dan menahan job lain di target yang sama.
+
+**2. Lock eksekusi di database target.** Sebelum SQL berjalan, worker mengambil `pg_try_advisory_lock(hashtext('if3110.migration'))` pada koneksi khusus ([`internal/batch/batch.go`](internal/batch/batch.go)). Untuk MariaDB, worker memakai `GET_LOCK` per database. Lock ini *session-level*, sehingga bertahan di antara commit batch dan baru dilepas setelah seluruh migration selesai. Advisory lock PostgreSQL berlaku per database, jadi database berbeda tetap dapat diproses paralel.
+
+**Ketika worker gagal:**
+
+| Kejadian | Lock target | Lease job | Pemulihan |
+|---|---|---|---|
+| Proses worker mati atau crash | Koneksi tertutup, dan database otomatis melepas session lock | Heartbeat berhenti, lease kedaluwarsa setelah `WORKER_LEASE` | Worker lain mengklaim job, mengambil lock, lalu membaca bukti di target sebelum melanjutkan |
+| Worker hang atau jaringan ke platform putus | Lock tetap dipegang selama koneksi target masih hidup | Heartbeat gagal, worker membatalkan context, melepas lock, dan menutup koneksi | Worker pengganti menunggu lock maksimal `WORKER_LOCK_WAIT`. Jika masih sibuk (`ErrBusy`), job dijadwalkan ulang dengan backoff dan batas percobaan |
+| Unlock gagal saat selesai | Koneksi ditutup paksa supaya session lock pasti lepas (`session.release`) | Tidak berubah | Tidak ada lock yang tertinggal |
+
+Selama worker lama masih memegang lock target, worker pengganti tidak bisa menjalankan SQL di database yang sama. Karena itu tidak terjadi double commit, walaupun lease sudah berpindah tangan. Worker pengganti tidak mengulang batch secara buta. Ia membaca checkpoint dan bukti ber-HMAC di skema `_platform` target, yang ditulis dalam transaksi yang sama dengan perubahan batch. Batch yang sudah committed dilewati. Jika bukti tidak dapat dibaca, job ditandai `commit_unknown` dan migration lain pada database itu ditahan sampai direkonsiliasi lewat resume atau kompensasi.
+
 ## Observability
 
 ```powershell
@@ -198,6 +216,71 @@ go run ./cmd/server
 ```
 
 Grafana menggunakan akun `admin` dan password dari `GRAFANA_ADMIN_PASSWORD`. Dashboard **IF3110 - Queue, Migration & Pool** dimuat bersama tiga datasource. Collector meneruskan log ke Loki dan trace ke Tempo. Prometheus mengambil metrik request HTTP dan pool database dari `/metrics`. Worker mengekspor metrik queue, batch, dan pool pada port 9102. Prometheus mengambil metrik API pada port 8080 dan worker pada port 9102. [Grafana development](http://127.0.0.1:3000), [konfigurasi Prometheus](deploy/observability/prometheus.yaml), dan [dashboard Grafana](deploy/observability/grafana/dashboards/platform.json) menyediakan akses serta konfigurasi observability.
+
+### Contoh log dan span
+
+Contoh berikut diambil dari server dan worker lokal tanpa Collector. Tanpa `OTEL_EXPORTER_OTLP_ENDPOINT`, span ditulis ke stdout memakai exporter console. Skenarionya satu migration `apply` yang berhasil (job 1) dan satu migration yang gagal karena unique violation (job 2). Setiap baris log adalah JSON dari `log/slog`. Baris dipotong pada atribut yang tidak relevan.
+
+**API menerima enqueue** (server):
+
+```json
+{"time":"2026-11-27T07:37:56.5406331+07:00","level":"INFO","msg":"http.request","method":"POST","status":202,"duration_ms":14,"request_id":"71ca963c-985a-445e-9a93-04c134267b79","trace_id":"6f08a1336c88c111531ed5c4d33d83f8","span_id":"683bcd9b14229b1f"}
+```
+
+**Worker mengklaim job, mengambil lock, menjalankan SQL, lalu commit** (worker, trace yang sama):
+
+```json
+{"time":"2026-11-27T07:37:57.4880042+07:00","level":"INFO","msg":"job.claimed","event":"job.claimed","status":"running","actor":"1","database":"b1143856-3cf2-4d03-8af8-022c58c8eb0e","correlation_id":"b1d3af18-8777-468a-9043-d67c849068a6","job_id":1,"migration_id":"8","request_id":"b1d3af18-8777-468a-9043-d67c849068a6","attempt":1,"op":"apply","kind":"run","retry":0,"trace_id":"6f08a1336c88c111531ed5c4d33d83f8","span_id":"65345986fb776f04"}
+{"time":"2026-11-27T07:37:57.5221513+07:00","level":"INFO","msg":"lock.acquired","event":"lock.acquired","status":"ok","actor":"1","database":"b1143856-3cf2-4d03-8af8-022c58c8eb0e","correlation_id":"b1d3af18-8777-468a-9043-d67c849068a6","job_id":1,"migration_id":"8","execution_id":"254b0cab-aa7b-4c35-93a2-b2c61039a50e","attempt":1,"op":"apply","wait_ms":4.344,"trace_id":"6f08a1336c88c111531ed5c4d33d83f8","span_id":"606e3c1a117ce8d3"}
+{"time":"2026-11-27T07:37:57.5722716+07:00","level":"INFO","msg":"sql.start","event":"sql.start","status":"started","query":"CREATE TABLE public.demo_log_1795739876 (id bigint PRIMARY KEY, note text)","params":[],"actor":"1","database":"b1143856-3cf2-4d03-8af8-022c58c8eb0e","job_id":1,"migration_id":"8","execution_id":"254b0cab-aa7b-4c35-93a2-b2c61039a50e","attempt":1,"op":"apply","trace_id":"6f08a1336c88c111531ed5c4d33d83f8","span_id":"b7a55464cdae219c"}
+{"time":"2026-11-27T07:37:57.5759091+07:00","level":"INFO","msg":"sql.result","event":"sql.result","status":"ok","duration_ms":3.637,"rows":0,"actor":"1","database":"b1143856-3cf2-4d03-8af8-022c58c8eb0e","job_id":1,"migration_id":"8","execution_id":"254b0cab-aa7b-4c35-93a2-b2c61039a50e","attempt":1,"op":"apply","trace_id":"6f08a1336c88c111531ed5c4d33d83f8","span_id":"b7a55464cdae219c"}
+{"time":"2026-11-27T07:37:57.5858895+07:00","level":"INFO","msg":"sql.commit.start","event":"sql.commit.start","status":"started","query":"commit","params":[],"actor":"1","database":"b1143856-3cf2-4d03-8af8-022c58c8eb0e","job_id":1,"migration_id":"8","execution_id":"254b0cab-aa7b-4c35-93a2-b2c61039a50e","attempt":1,"op":"apply","trace_id":"6f08a1336c88c111531ed5c4d33d83f8","span_id":"53bc3203c90f6342"}
+{"time":"2026-11-27T07:37:57.586638+07:00","level":"INFO","msg":"job.finished","event":"job.finished","status":"success","actor":"1","database":"b1143856-3cf2-4d03-8af8-022c58c8eb0e","job_id":1,"migration_id":"8","execution_id":"254b0cab-aa7b-4c35-93a2-b2c61039a50e","attempt":1,"op":"apply","hold":"none","trace_id":"6f08a1336c88c111531ed5c4d33d83f8","span_id":"65345986fb776f04"}
+```
+
+**Kegagalan SQL** (job 2). Error dicatat bersama SQLSTATE, dan literal pada query disamarkan menjadi `'?'`:
+
+```json
+{"time":"2026-11-27T07:38:43.7762627+07:00","level":"WARN","msg":"sql.result","event":"sql.result","status":"error","duration_ms":1.514,"error":"Database error (SQLSTATE 23505).","sqlstate":"23505","actor":"1","database":"8cfa5b52-1bb7-482e-9d02-98ac1d940f14","job_id":2,"migration_id":"9","execution_id":"1068f7f1-388a-4a57-a8c6-e08e5549efb0","attempt":1,"op":"apply","trace_id":"c999aa0ab1175adbab916bcf5ca3da0a","span_id":"3e7a70157f9fcc3d"}
+{"time":"2026-11-27T07:38:43.7883442+07:00","level":"INFO","msg":"job.finished","event":"job.finished","status":"failed","actor":"1","database":"8cfa5b52-1bb7-482e-9d02-98ac1d940f14","job_id":2,"migration_id":"9","execution_id":"1068f7f1-388a-4a57-a8c6-e08e5549efb0","attempt":1,"op":"apply","hold":"none","trace_id":"c999aa0ab1175adbab916bcf5ca3da0a","span_id":"4247257f90698ba3"}
+```
+
+**Rantai span job 1** (trace `6f08a1336c88c111531ed5c4d33d83f8`). Trace context ikut tersimpan bersama job di queue, sehingga span worker menjadi anak dari span request API:
+
+| Span | Proses | Span ID | Parent | Durasi |
+|---|---|---|---|---|
+| `http.request` (POST enqueue, 202) | server | `683bcd9b14229b1f` | (root) | 14 ms |
+| `job.run` | worker | `65345986fb776f04` | `683bcd9b14229b1f` | 98 ms |
+| `lock.acquire` | worker | `606e3c1a117ce8d3` | `65345986fb776f04` | 5 ms |
+| `db.query` (CREATE TABLE) | worker | `b7a55464cdae219c` | `65345986fb776f04` | 3,6 ms |
+
+**Span query yang gagal** (output exporter console, job 2, diringkas):
+
+```json
+{
+  "Name": "db.query",
+  "SpanContext": {"TraceID": "c999aa0ab1175adbab916bcf5ca3da0a", "SpanID": "3e7a70157f9fcc3d"},
+  "Parent": {"TraceID": "c999aa0ab1175adbab916bcf5ca3da0a", "SpanID": "4247257f90698ba3"},
+  "SpanKind": 3,
+  "StartTime": "2026-11-27T07:38:43.7747481+07:00",
+  "EndTime": "2026-11-27T07:38:43.7762627+07:00",
+  "Attributes": [
+    {"Key": "db.system", "Value": {"Type": "STRING", "Value": "postgresql"}},
+    {"Key": "db.statement", "Value": {"Type": "STRING", "Value": "INSERT INTO public.demo_log_1795739876 (id, note) VALUES (1, '?'), (1, '?')"}}
+  ],
+  "Events": [{"Name": "exception", "Attributes": [
+    {"Key": "exception.type", "Value": {"Type": "STRING", "Value": "*errors.errorString"}},
+    {"Key": "exception.message", "Value": {"Type": "STRING", "Value": "Database error (SQLSTATE 23505)."}}
+  ]}],
+  "Status": {"Code": "Error", "Description": "Database error (SQLSTATE 23505)."},
+  "Resource": [
+    {"Key": "service.name", "Value": {"Type": "STRING", "Value": "if3110-worker"}},
+    {"Key": "service.version", "Value": {"Type": "STRING", "Value": "2.0.0"}}
+  ]
+}
+```
+
+Credential koneksi, cookie, dan token session tidak muncul di log. Password koneksi target hanya disimpan terenkripsi (`password_enc`) dan tidak ikut dicatat.
 
 ## CodeQL
 
